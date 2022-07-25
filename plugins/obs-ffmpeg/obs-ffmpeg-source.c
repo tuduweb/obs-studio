@@ -406,7 +406,6 @@ static bool requires_mpegts(const char *path)
 static void ffmpeg_source_update(void *data, obs_data_t *settings)
 {
 	struct ffmpeg_source *s = data;
-
 	bool is_local_file = obs_data_get_bool(settings, "is_local_file");
 
 	const char *input;
@@ -470,6 +469,10 @@ static void ffmpeg_source_update(void *data, obs_data_t *settings)
 
 	if (s->media_valid) {
 		mp_media_free(&s->media);
+
+		//obs_source_media_stop(s->source);
+		//obs_source_output_video(s->source, NULL);
+
 		s->media_valid = false;
 	}
 
@@ -480,6 +483,9 @@ static void ffmpeg_source_update(void *data, obs_data_t *settings)
 	dump_source_info(s, input, input_format);
 	if (!s->restart_on_activate || active)
 		ffmpeg_source_start(s);
+
+	if (!s->media.has_video)
+		obs_source_output_video(s->source, NULL);
 }
 
 static const char *ffmpeg_source_getname(void *unused)
