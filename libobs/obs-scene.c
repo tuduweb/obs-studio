@@ -2240,7 +2240,15 @@ void obs_sceneitem_remove(obs_sceneitem_t *item)
 
 	set_visibility(item, false);
 
-	signal_item_remove(item);
+	// obs_sceneitem_t *parentGroup =
+	// 	obs_sceneitem_get_group(main->GetCurrentScene(), item);
+
+	// if(parentGroup) {
+	// 	do_update_transform(parentGroup);
+	// }
+		
+
+	signal_item_remove(item);//signal to source-tree
 	detach_sceneitem(item);
 
 	full_unlock(scene);
