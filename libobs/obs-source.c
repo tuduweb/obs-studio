@@ -360,8 +360,7 @@ obs_source_create_internal(const char *id, const char *name,
 		 *
 		 * XXX: Fix design flaws with filters */
 		if (info->type == OBS_SOURCE_TYPE_FILTER)
-		private
-		= true;
+		private = true;
 	}
 
 	source->mute_unmute_key = OBS_INVALID_HOTKEY_PAIR_ID;
@@ -606,6 +605,7 @@ void obs_source_frame_init(struct obs_source_frame *frame,
 	for (size_t i = 0; i < MAX_AV_PLANES; i++) {
 		frame->data[i] = vid_frame.data[i];
 		frame->linesize[i] = vid_frame.linesize[i];
+		frame->ysize[i] = vid_frame.ysize[i];
 	}
 }
 
@@ -979,6 +979,12 @@ void obs_source_update(obs_source_t *source, obs_data_t *settings)
 	if (settings) {
 		obs_data_apply(source->context.settings, settings);
 	}
+
+	//if (source->async_preload_frame) {
+	//	obs_source_frame_destroy(source->async_preload_frame);
+	//	source->async_preload_frame = NULL;
+	//	obs_source_output_video(source, NULL);
+	//}
 
 	if (source->info.output_flags & OBS_SOURCE_VIDEO) {
 		os_atomic_inc_long(&source->defer_update_count);
@@ -2059,8 +2065,9 @@ static void upload_raw_frame(gs_texture_t *tex[MAX_AV_PLANES],
 	case CONVERT_P010:
 		for (size_t c = 0; c < MAX_AV_PLANES; c++) {
 			if (tex[c])
-				gs_texture_set_image(tex[c], frame->data[c],
-						     frame->linesize[c], false);
+				gs_texture_set_image2(tex[c], frame->data[c],
+						      frame->linesize[c],
+						      frame->ysize[c], false);
 		}
 		break;
 

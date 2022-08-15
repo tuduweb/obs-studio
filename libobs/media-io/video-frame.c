@@ -55,6 +55,9 @@ void video_frame_init(struct video_frame *frame, enum video_format format,
 		frame->linesize[0] = width;
 		frame->linesize[1] = half_width;
 		frame->linesize[2] = half_width;
+		frame->ysize[0] = height;
+		frame->ysize[1] = half_height;
+		frame->ysize[2] = half_height;
 		break;
 	}
 

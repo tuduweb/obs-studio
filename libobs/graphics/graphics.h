@@ -633,6 +633,9 @@ EXPORT void gs_viewport_pop(void);
 
 EXPORT void gs_texture_set_image(gs_texture_t *tex, const uint8_t *data,
 				 uint32_t linesize, bool invert);
+EXPORT void gs_texture_set_image2(gs_texture_t *tex, const uint8_t *data,
+				  uint32_t linesize, uint32_t ysize,
+				  bool invert);
 EXPORT void gs_cubetexture_set_image(gs_texture_t *cubetex, uint32_t side,
 				     const void *data, uint32_t linesize,
 				     bool invert);

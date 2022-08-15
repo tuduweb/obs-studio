@@ -263,6 +263,7 @@ struct obs_source_cea_708 {
 struct obs_source_frame {
 	uint8_t *data[MAX_AV_PLANES];
 	uint32_t linesize[MAX_AV_PLANES];
+	uint32_t ysize[MAX_AV_PLANES];
 	uint32_t width;
 	uint32_t height;
 	uint64_t timestamp;
