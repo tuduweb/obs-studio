@@ -1191,6 +1191,64 @@ void gs_texture_set_image(gs_texture_t *tex, const uint8_t *data,
 	gs_texture_unmap(tex);
 }
 
+void gs_texture_set_image2(gs_texture_t *tex, const uint8_t *data,
+			   uint32_t linesize, uint32_t ysize, bool flip)
+{
+	uint8_t *ptr;
+	uint32_t linesize_out;
+	size_t row_copy, col_copy;
+	size_t height;
+
+	if (!gs_valid_p2("gs_texture_set_image2", tex, data))
+		return;
+
+	if (!gs_texture_map(tex, &ptr, &linesize_out))
+		return;
+
+	row_copy = (linesize < linesize_out) ? linesize : linesize_out;
+
+	height = gs_texture_get_height(tex);
+
+	// Limit the ysize to avoid memory overflow in memcpy
+	if (ysize) {
+		col_copy = (ysize < height) ? ysize : height;
+	} else {
+		col_copy = height;
+	}
+
+	if (flip) {
+		uint8_t *const end = ptr + col_copy * linesize_out;
+		data += (col_copy - 1) * linesize;
+		while (ptr < end) {
+			memcpy(ptr, data, row_copy);
+			ptr += linesize_out;
+			data -= linesize;
+		}
+
+	} else if (linesize == linesize_out) {
+		memcpy(ptr, data, row_copy * col_copy);
+	} else if (col_copy < height) {
+		uint8_t *const end = ptr + col_copy * linesize_out;
+		uint8_t *const end2 = ptr + height * linesize_out;
+
+		while (ptr < end) {
+			memcpy(ptr, data, row_copy);
+			ptr += linesize_out;
+			data += linesize;
+		}
+		//memset(ptr, 0, end2 - end);
+	} else {
+		uint8_t *const end = ptr + height * linesize_out;
+		while (ptr < end) {
+			memcpy(ptr, data, row_copy);
+			ptr += linesize_out;
+			data += linesize;
+		}
+	}
+
+	gs_texture_unmap(tex);
+}
+
 void gs_cubetexture_set_image(gs_texture_t *cubetex, uint32_t side,
 			      const void *data, uint32_t linesize, bool invert)
 {
