@@ -1207,9 +1207,9 @@ static void async_tick(obs_source_t *source)
 	source->last_sys_timestamp = sys_time;
 	pthread_mutex_unlock(&source->async_mutex);
 
-	if (source->cur_async_frame)
-		source->async_update_texture =
-			set_async_texture_size(source, source->cur_async_frame);
+	// if (source->cur_async_frame)
+	// 	source->async_update_texture =
+	// 		set_async_texture_size(source, source->cur_async_frame);
 }
 
 void obs_source_video_tick(obs_source_t *source, float seconds)
@@ -1975,9 +1975,6 @@ static inline bool init_gpu_conversion(struct obs_source *source,
 bool set_async_texture_size(struct obs_source *source,
 			    const struct obs_source_frame *frame)
 {
-	enum convert_type cur =
-		get_convert_type(frame->format, frame->full_range, frame->trc);
-
 	if (source->async_width == frame->width &&
 	    source->async_height == frame->height &&
 	    source->async_format == frame->format &&
@@ -2007,6 +2004,8 @@ bool set_async_texture_size(struct obs_source *source,
 
 	const enum gs_color_format format =
 		convert_video_format(frame->format, frame->trc);
+	enum convert_type cur =
+		get_convert_type(frame->format, frame->full_range, frame->trc);
 	const bool async_gpu_conversion = (cur != CONVERT_NONE) &&
 					  init_gpu_conversion(source, frame);
 	source->async_gpu_conversion = async_gpu_conversion;
@@ -2037,6 +2036,8 @@ bool set_async_texture_size(struct obs_source *source,
 static void upload_raw_frame(gs_texture_t *tex[MAX_AV_PLANES],
 			     const struct obs_source_frame *frame)
 {
+	static uint32_t debug_height[3] = {0, 0, 0};
+
 	switch (get_convert_type(frame->format, frame->full_range,
 				 frame->trc)) {
 	case CONVERT_422_PACK:
@@ -2057,6 +2058,16 @@ static void upload_raw_frame(gs_texture_t *tex[MAX_AV_PLANES],
 	case CONVERT_444_A_PACK:
 	case CONVERT_I010:
 	case CONVERT_P010:
+		for (size_t c = 0; c < MAX_AV_PLANES; c++) {
+			if (tex[c])
+				debug_height[c] = gs_texture_get_height(tex[c]);
+			else
+				debug_height[c] = 0;
+		}
+		if (debug_height[0] != 0 && frame->height != debug_height[0]) {
+			int i = 0;
+			i++;
+		}
 		for (size_t c = 0; c < MAX_AV_PLANES; c++) {
 			if (tex[c])
 				gs_texture_set_image(tex[c], frame->data[c],
@@ -2382,6 +2393,9 @@ static void obs_source_update_async_video(obs_source_t *source)
 
 		source->async_rendered = true;
 		if (frame) {
+			const bool async_update_texture =
+				set_async_texture_size(source, frame);
+
 			check_to_swap_bgrx_bgra(source, frame);
 
 			if (!source->async_decoupled ||
@@ -2391,11 +2405,11 @@ static void obs_source_update_async_video(obs_source_t *source)
 				source->timing_set = true;
 			}
 
-			if (source->async_update_texture) {
+			if (async_update_texture) {
 				update_async_textures(source, frame,
 						      source->async_textures,
 						      source->async_texrender);
-				source->async_update_texture = false;
+				//source->async_update_texture = false;
 			}
 
 			obs_source_release_frame(source, frame);
