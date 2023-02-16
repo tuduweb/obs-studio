@@ -40,6 +40,7 @@ struct ffmpeg_cfg {
 	const char *username;
 	const char *password;
 	const char *key;
+	const char *audio_track_names[MAX_AUDIO_MIXES];
 };
 
 struct ffmpeg_audio_info {

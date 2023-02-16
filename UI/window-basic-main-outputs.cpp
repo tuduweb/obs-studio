@@ -1596,7 +1596,27 @@ inline void AdvancedOutput::SetupFFmpeg()
 		config_get_int(main->Config(), "AdvOut", "FFAEncoderId");
 	const char *aEncCustom =
 		config_get_string(main->Config(), "AdvOut", "FFACustom");
+	
 	OBSDataAutoRelease settings = obs_data_create();
+	//obs_data_array_t *array = obs_data_array_create();
+
+    for (size_t i = 0; i < MAX_AUDIO_MIXES; i++) {
+	    string cfg_name = "Track";
+	    cfg_name += to_string((int)i + 1);
+	    cfg_name += "Name";
+	    const char *name = config_get_string(main->Config(), "AdvOut",
+					         cfg_name.c_str());
+
+	    string def_name = "Track";
+	    def_name += to_string((int)i + 1);
+	    // // SetEncoderName(aacTrack[i], name, def_name.c_str());
+		// (name && *name) ? name : defaultName
+		//obs_data_set_string(audioNames, def_name, name);
+    
+		//obs_data_array_push_back(array, name);
+	
+		obs_data_set_string(settings, def_name.c_str(), name);
+	}
 
 	obs_data_set_string(settings, "url", url);
 	obs_data_set_string(settings, "format_name", formatName);
