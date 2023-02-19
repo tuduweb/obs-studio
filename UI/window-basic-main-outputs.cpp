@@ -1609,12 +1609,14 @@ inline void AdvancedOutput::SetupFFmpeg()
 
 		OBSDataAutoRelease item = obs_data_create();
 		obs_data_set_string(item, "name", audioName);
-		obs_data_array_push_back(audio_names, item);	
+		obs_data_array_push_back(audio_names, item);
 	}
 
 	OBSDataAutoRelease settings = obs_data_create();
 
 	obs_data_set_array(settings, "audio_names", audio_names);
+	obs_data_array_release(audio_names);
+
 	obs_data_set_string(settings, "url", url);
 	obs_data_set_string(settings, "format_name", formatName);
 	obs_data_set_string(settings, "format_mime_type", mimeType);
