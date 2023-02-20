@@ -2846,10 +2846,10 @@ static inline void AddHotkeys(
 void OBSBasicSettings::LoadHotkeySettings(obs_hotkey_id ignoreKey)
 {
 	hotkeys.clear();
-	if (ui->hotkeyFormLayout->rowCount() > 0) {
+	if (ui->hotkeyFormLayout->count() > 0) {
 		QLayoutItem *forDeletion = ui->hotkeyFormLayout->takeAt(0);
-		forDeletion->widget()->deleteLater();
-		delete forDeletion;
+		//forDeletion->widget()->deleteLater();
+		//delete forDeletion;
 	}
 	ui->hotkeyFilterSearch->blockSignals(true);
 	ui->hotkeyFilterInput->blockSignals(true);
@@ -2880,7 +2880,7 @@ void OBSBasicSettings::LoadHotkeySettings(obs_hotkey_id ignoreKey)
 					 Qt::AlignVCenter);
 	auto hotkeyChildWidget = new QWidget();
 	hotkeyChildWidget->setLayout(hotkeysLayout);
-	ui->hotkeyFormLayout->addRow(hotkeyChildWidget);
+	ui->hotkeyFormLayout->addWidget(hotkeyChildWidget);
 
 	using namespace std;
 	using encoders_elem_t =
@@ -4513,7 +4513,7 @@ void OBSBasicSettings::SearchHotkeys(const QString &text,
 				     obs_key_combination_t filterCombo)
 {
 
-	if (ui->hotkeyFormLayout->rowCount() == 0)
+	if (ui->hotkeyFormLayout->count() == 0)
 		return;
 
 	std::vector<obs_key_combination_t> combos;

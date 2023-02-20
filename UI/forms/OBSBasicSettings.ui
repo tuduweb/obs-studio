@@ -169,8 +169,8 @@
              <rect>
               <x>0</x>
               <y>0</y>
-              <width>767</width>
-              <height>1326</height>
+              <width>764</width>
+              <height>1120</height>
              </rect>
             </property>
             <layout class="QVBoxLayout" name="verticalLayout_19">
@@ -281,11 +281,11 @@
                    <string>Basic.Settings.General.Updater</string>
                   </property>
                   <layout class="QFormLayout" name="formLayout_20">
-                   <property name="labelAlignment">
-                    <set>Qt::AlignRight|Qt::AlignTrailing|Qt::AlignVCenter</set>
-                   </property>
                    <property name="fieldGrowthPolicy">
                     <enum>QFormLayout::AllNonFixedFieldsGrow</enum>
+                   </property>
+                   <property name="labelAlignment">
+                    <set>Qt::AlignRight|Qt::AlignTrailing|Qt::AlignVCenter</set>
                    </property>
                    <item row="0" column="0">
                     <widget class="QLabel" name="updateChannelLabel">
@@ -1571,8 +1571,8 @@
                     <rect>
                      <x>0</x>
                      <y>0</y>
-                     <width>772</width>
-                     <height>651</height>
+                     <width>550</width>
+                     <height>530</height>
                     </rect>
                    </property>
                    <property name="sizePolicy">
@@ -2156,8 +2156,8 @@
                         <rect>
                          <x>0</x>
                          <y>0</y>
-                         <width>759</width>
-                         <height>616</height>
+                         <width>458</width>
+                         <height>134</height>
                         </rect>
                        </property>
                        <layout class="QVBoxLayout" name="verticalLayout_14">
@@ -2503,8 +2503,8 @@
                             <rect>
                              <x>0</x>
                              <y>0</y>
-                             <width>759</width>
-                             <height>587</height>
+                             <width>559</width>
+                             <height>316</height>
                             </rect>
                            </property>
                            <property name="sizePolicy">
@@ -3154,8 +3154,8 @@
                             <rect>
                              <x>0</x>
                              <y>0</y>
-                             <width>759</width>
-                             <height>587</height>
+                             <width>655</width>
+                             <height>426</height>
                             </rect>
                            </property>
                            <layout class="QVBoxLayout" name="verticalLayout_27">
@@ -3673,8 +3673,8 @@
                            <rect>
                             <x>0</x>
                             <y>0</y>
-                            <width>759</width>
-                            <height>616</height>
+                            <width>259</width>
+                            <height>450</height>
                            </rect>
                           </property>
                           <layout class="QVBoxLayout" name="verticalLayout_28">
@@ -4736,8 +4736,8 @@
              <rect>
               <x>0</x>
               <y>0</y>
-              <width>781</width>
-              <height>640</height>
+              <width>637</width>
+              <height>474</height>
              </rect>
             </property>
             <layout class="QVBoxLayout" name="verticalLayout_50">
@@ -5670,16 +5670,10 @@
               <x>0</x>
               <y>0</y>
               <width>761</width>
-              <height>644</height>
+              <height>643</height>
              </rect>
             </property>
-            <layout class="QFormLayout" name="hotkeyFormLayout">
-             <property name="labelAlignment">
-              <set>Qt::AlignRight|Qt::AlignTrailing|Qt::AlignVCenter</set>
-             </property>
-             <property name="verticalSpacing">
-              <number>0</number>
-             </property>
+            <layout class="QVBoxLayout" name="hotkeyFormLayout">
              <property name="leftMargin">
               <number>9</number>
              </property>
@@ -5692,7 +5686,7 @@
              <property name="bottomMargin">
               <number>9</number>
              </property>
-             <item row="0" column="0" colspan="2">
+             <item>
               <widget class="QLabel" name="pleaseWaitLabel">
                <property name="sizePolicy">
                 <sizepolicy hsizetype="Preferred" vsizetype="Preferred">
@@ -5748,7 +5742,7 @@
               <x>0</x>
               <y>0</y>
               <width>799</width>
-              <height>666</height>
+              <height>664</height>
              </rect>
             </property>
             <layout class="QVBoxLayout" name="verticalLayout_42">
@@ -6656,8 +6650,8 @@
              <rect>
               <x>0</x>
               <y>0</y>
-              <width>826</width>
-              <height>1000</height>
+              <width>766</width>
+              <height>843</height>
              </rect>
             </property>
             <layout class="QVBoxLayout" name="verticalLayout_23">
