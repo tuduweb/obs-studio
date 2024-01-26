@@ -82,7 +82,7 @@ set_target_properties(
              AUTORCC ON
              AUTOUIC_SEARCH_PATHS "forms;forms/source-toolbar")
 
-if(_QT_VERSION EQUAL 6 AND OS_WINDOWS)
+if(OS_WINDOWS)
   set_target_properties(obs PROPERTIES AUTORCC_OPTIONS "--format-version;1")
 endif()
 
@@ -103,6 +103,7 @@ target_sources(
           forms/OBSBasic.ui
           forms/OBSBasicFilters.ui
           forms/OBSBasicInteraction.ui
+          forms/OBSBasicProperties.ui
           forms/OBSBasicSettings.ui
           forms/OBSBasicSourceSelect.ui
           forms/OBSBasicTransform.ui
@@ -110,10 +111,12 @@ target_sources(
           forms/OBSExtraBrowsers.ui
           forms/OBSImporter.ui
           forms/OBSLogReply.ui
+          forms/OBSLogViewer.ui
           forms/OBSMissingFiles.ui
           forms/OBSRemux.ui
           forms/OBSUpdate.ui
           forms/OBSYoutubeActions.ui
+          forms/StatusBarWidget.ui
           forms/source-toolbar/browser-source-toolbar.ui
           forms/source-toolbar/color-source-toolbar.ui
           forms/source-toolbar/device-select-toolbar.ui
@@ -147,10 +150,10 @@ target_sources(
           ui-validation.hpp
           multiview.cpp
           multiview.hpp
+          ffmpeg-utils.cpp
+          ffmpeg-utils.hpp
           ${CMAKE_SOURCE_DIR}/deps/json11/json11.cpp
           ${CMAKE_SOURCE_DIR}/deps/json11/json11.hpp
-          ${CMAKE_SOURCE_DIR}/deps/libff/libff/ff-util.c
-          ${CMAKE_SOURCE_DIR}/deps/libff/libff/ff-util.h
           ${CMAKE_CURRENT_BINARY_DIR}/ui-config.h)
 
 target_sources(
@@ -169,15 +172,12 @@ target_sources(
           item-widget-helpers.hpp
           context-bar-controls.cpp
           context-bar-controls.hpp
-          expand-checkbox.hpp
           focus-list.cpp
           focus-list.hpp
           hotkey-edit.cpp
           hotkey-edit.hpp
           lineedit-autoresize.cpp
           lineedit-autoresize.hpp
-          locked-checkbox.cpp
-          locked-checkbox.hpp
           log-viewer.cpp
           log-viewer.hpp
           media-controls.cpp
@@ -217,8 +217,6 @@ target_sources(
           volume-control.hpp
           vertical-scroll-area.cpp
           vertical-scroll-area.hpp
-          visibility-checkbox.cpp
-          visibility-checkbox.hpp
           visibility-item-widget.cpp
           visibility-item-widget.hpp)
 
@@ -286,7 +284,7 @@ target_sources(obs PRIVATE importers/importers.cpp importers/importers.hpp impor
 
 target_compile_features(obs PRIVATE cxx_std_17)
 
-target_include_directories(obs PRIVATE ${CMAKE_SOURCE_DIR}/deps/json11 ${CMAKE_SOURCE_DIR}/deps/libff)
+target_include_directories(obs PRIVATE ${CMAKE_SOURCE_DIR}/deps/json11)
 
 target_link_libraries(obs PRIVATE CURL::libcurl FFmpeg::avcodec FFmpeg::avutil FFmpeg::avformat OBS::libobs
                                   OBS::frontend-api)
@@ -327,8 +325,16 @@ endif()
 
 if(YOUTUBE_ENABLED)
   target_compile_definitions(obs PRIVATE YOUTUBE_ENABLED)
-  target_sources(obs PRIVATE auth-youtube.cpp auth-youtube.hpp youtube-api-wrappers.cpp youtube-api-wrappers.hpp
-                             window-youtube-actions.cpp window-youtube-actions.hpp)
+  target_sources(
+    obs
+    PRIVATE auth-youtube.cpp
+            auth-youtube.hpp
+            window-dock-youtube-app.cpp
+            window-dock-youtube-app.hpp
+            window-youtube-actions.cpp
+            window-youtube-actions.hpp
+            youtube-api-wrappers.cpp
+            youtube-api-wrappers.hpp)
 endif()
 
 if(OS_WINDOWS)
@@ -337,6 +343,7 @@ if(OS_WINDOWS)
   configure_file(${CMAKE_CURRENT_SOURCE_DIR}/obs.rc.in ${CMAKE_BINARY_DIR}/obs.rc)
 
   find_package(Detours REQUIRED)
+  find_package(nlohmann_json REQUIRED)
 
   target_sources(
     obs
@@ -353,27 +360,23 @@ if(OS_WINDOWS)
             update/update-helpers.hpp
             update/crypto-helpers-mbedtls.cpp
             update/crypto-helpers.hpp
+            update/models/branches.hpp
+            update/models/whatsnew.hpp
+            win-update/updater/manifest.hpp
             ${CMAKE_BINARY_DIR}/obs.rc)
 
-  if(_QT_VERSION EQUAL 5)
-    find_qt(COMPONENTS WinExtras)
-    target_link_libraries(obs PRIVATE Qt::WinExtras)
-  endif()
-
   find_package(MbedTLS)
-  target_link_libraries(obs PRIVATE Mbedtls::Mbedtls OBS::blake2 Detours::Detours)
+  target_link_libraries(obs PRIVATE Mbedtls::Mbedtls nlohmann_json::nlohmann_json OBS::blake2 Detours::Detours)
 
   target_compile_features(obs PRIVATE cxx_std_17)
 
   target_compile_definitions(obs PRIVATE UNICODE _UNICODE _CRT_SECURE_NO_WARNINGS _CRT_NONSTDC_NO_WARNINGS
                                          PSAPI_VERSION=2)
 
+  set_source_files_properties(update/win-update.cpp PROPERTIES COMPILE_DEFINITIONS OBS_COMMIT="${OBS_COMMIT}")
   if(MSVC)
     target_link_options(obs PRIVATE "LINKER:/IGNORE:4098" "LINKER:/IGNORE:4099")
     target_link_libraries(obs PRIVATE OBS::w32-pthreads)
-
-    set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}../deps/libff/libff/ff-util.c PROPERTIES COMPILE_FLAGS
-                                                                                                    -Dinline=__inline)
   endif()
 
   if(CMAKE_SIZEOF_VOID_P EQUAL 4)
@@ -424,17 +427,27 @@ elseif(OS_MACOS)
 
   if(ENABLE_WHATSNEW)
     find_library(SECURITY Security)
+    find_package(nlohmann_json REQUIRED)
     mark_as_advanced(SECURITY)
-    target_link_libraries(obs PRIVATE ${SECURITY} OBS::blake2)
 
-    target_sources(obs PRIVATE update/crypto-helpers.hpp update/crypto-helpers-mac.mm update/shared-update.cpp
-                               update/shared-update.hpp update/update-helpers.cpp update/update-helpers.hpp)
+    target_link_libraries(obs PRIVATE ${SECURITY} OBS::blake2 nlohmann_json::nlohmann_json)
+
+    target_sources(
+      obs
+      PRIVATE update/crypto-helpers.hpp
+              update/crypto-helpers-mac.mm
+              update/shared-update.cpp
+              update/shared-update.hpp
+              update/update-helpers.cpp
+              update/update-helpers.hpp
+              update/models/whatsnew.hpp)
 
     if(SPARKLE_APPCAST_URL AND SPARKLE_PUBLIC_KEY)
       find_library(SPARKLE Sparkle)
       mark_as_advanced(SPARKLE)
 
-      target_sources(obs PRIVATE update/mac-update.cpp update/mac-update.hpp update/sparkle-updater.mm)
+      target_sources(obs PRIVATE update/mac-update.cpp update/mac-update.hpp update/sparkle-updater.mm
+                                 update/models/branches.hpp)
       target_compile_definitions(obs PRIVATE ENABLE_SPARKLE_UPDATER)
       target_link_libraries(obs PRIVATE ${SPARKLE})
       # Enable Automatic Reference Counting for Sparkle wrapper
@@ -466,13 +479,14 @@ elseif(OS_POSIX)
 
   if(OS_LINUX AND ENABLE_WHATSNEW)
     find_package(MbedTLS)
+    find_package(nlohmann_json REQUIRED)
     if(NOT MBEDTLS_FOUND)
       obs_status(FATAL_ERROR "mbedTLS not found, but required for WhatsNew support on Linux")
     endif()
 
     target_sources(obs PRIVATE update/crypto-helpers.hpp update/crypto-helpers-mbedtls.cpp update/shared-update.cpp
                                update/shared-update.hpp update/update-helpers.cpp update/update-helpers.hpp)
-    target_link_libraries(obs PRIVATE Mbedtls::Mbedtls OBS::blake2)
+    target_link_libraries(obs PRIVATE Mbedtls::Mbedtls nlohmann_json::nlohmann_json OBS::blake2)
   endif()
 endif()
 
@@ -486,6 +500,10 @@ source_group(
   FILES ${_UI})
 unset(_SOURCES)
 unset(_UI)
+
+get_property(OBS_MODULE_LIST GLOBAL PROPERTY OBS_MODULE_LIST)
+list(JOIN OBS_MODULE_LIST "|" SAFE_MODULES)
+target_compile_definitions(obs PRIVATE "SAFE_MODULES=\"${SAFE_MODULES}\"")
 
 define_graphic_modules(obs)
 setup_obs_app(obs)

@@ -23,7 +23,7 @@ using namespace std;
 // Padding on top and bottom of vertical meters
 #define METER_PADDING 1
 
-QWeakPointer<VolumeMeterTimer> VolumeMeter::updateTimer;
+std::weak_ptr<VolumeMeterTimer> VolumeMeter::updateTimer;
 
 static inline Qt::CheckState GetCheckState(bool muted, bool unassigned)
 {
@@ -37,8 +37,11 @@ static inline Qt::CheckState GetCheckState(bool muted, bool unassigned)
 
 static inline bool IsSourceUnassigned(obs_source_t *source)
 {
-	return (obs_source_get_audio_mixers(source) &
-		((1 << MAX_AUDIO_MIXES) - 1)) == 0;
+	uint32_t mixes = (obs_source_get_audio_mixers(source) &
+			  ((1 << MAX_AUDIO_MIXES) - 1));
+	obs_monitoring_type mt = obs_source_get_monitoring_type(source);
+
+	return mixes == 0 && mt != OBS_MONITORING_TYPE_MONITOR_ONLY;
 }
 
 static void ShowUnassignedWarning(const char *name)
@@ -116,19 +119,19 @@ void VolControl::VolumeMuted(bool muted)
 	volMeter->muted = muted || unassigned;
 }
 
-void VolControl::OBSMixersChanged(void *data, calldata_t *calldata)
+void VolControl::OBSMixersOrMonitoringChanged(void *data, calldata_t *)
 {
-	VolControl *volControl = static_cast<VolControl *>(data);
-	bool unassigned = (calldata_int(calldata, "mixers") &
-			   ((1 << MAX_AUDIO_MIXES) - 1)) == 0;
 
-	QMetaObject::invokeMethod(volControl, "AssignmentChanged",
-				  Q_ARG(bool, unassigned));
+	VolControl *volControl = static_cast<VolControl *>(data);
+	QMetaObject::invokeMethod(volControl, "MixersOrMonitoringChanged",
+				  Qt::QueuedConnection);
 }
 
-void VolControl::AssignmentChanged(bool unassigned)
+void VolControl::MixersOrMonitoringChanged()
 {
 	bool muted = obs_source_muted(source);
+	bool unassigned = IsSourceUnassigned(source);
+
 	auto newState = GetCheckState(muted, unassigned);
 	if (mute->checkState() != newState)
 		mute->setCheckState(newState);
@@ -153,9 +156,9 @@ void VolControl::SetMuted(bool)
 			ShowUnassignedWarning(obs_source_get_name(source));
 	}
 
-	auto undo_redo = [](const std::string &name, bool val) {
+	auto undo_redo = [](const std::string &uuid, bool val) {
 		OBSSourceAutoRelease source =
-			obs_get_source_by_name(name.c_str());
+			obs_get_source_by_uuid(uuid.c_str());
 		obs_source_set_muted(source, val);
 	};
 
@@ -163,11 +166,12 @@ void VolControl::SetMuted(bool)
 		QTStr(checked ? "Undo.Volume.Mute" : "Undo.Volume.Unmute");
 
 	const char *name = obs_source_get_name(source);
+	const char *uuid = obs_source_get_uuid(source);
 	OBSBasic::Get()->undo_s.add_action(
 		text.arg(name),
 		std::bind(undo_redo, std::placeholders::_1, prev),
-		std::bind(undo_redo, std::placeholders::_1, checked), name,
-		name);
+		std::bind(undo_redo, std::placeholders::_1, checked), uuid,
+		uuid);
 }
 
 void VolControl::SliderChanged(int vol)
@@ -177,18 +181,19 @@ void VolControl::SliderChanged(int vol)
 	obs_fader_set_deflection(obs_fader, float(vol) / FADER_PRECISION);
 	updateText();
 
-	auto undo_redo = [](const std::string &name, float val) {
+	auto undo_redo = [](const std::string &uuid, float val) {
 		OBSSourceAutoRelease source =
-			obs_get_source_by_name(name.c_str());
+			obs_get_source_by_uuid(uuid.c_str());
 		obs_source_set_volume(source, val);
 	};
 
 	float val = obs_source_get_volume(source);
 	const char *name = obs_source_get_name(source);
+	const char *uuid = obs_source_get_uuid(source);
 	OBSBasic::Get()->undo_s.add_action(
 		QTStr("Undo.Volume.Change").arg(name),
 		std::bind(undo_redo, std::placeholders::_1, prev),
-		std::bind(undo_redo, std::placeholders::_1, val), name, name,
+		std::bind(undo_redo, std::placeholders::_1, val), uuid, uuid,
 		true);
 }
 
@@ -296,12 +301,15 @@ VolControl::VolControl(OBSSource source_, bool showConfig, bool vertical)
 		controlLayout->setContentsMargins(0, 0, 0, 0);
 		controlLayout->setSpacing(0);
 
-		if (showConfig)
+		if (showConfig) {
 			controlLayout->addWidget(config);
+			controlLayout->setAlignment(config, Qt::AlignVCenter);
+		}
 
 		controlLayout->addItem(new QSpacerItem(3, 0));
 		// Add Headphone (audio monitoring) widget here
 		controlLayout->addWidget(mute);
+		controlLayout->setAlignment(mute, Qt::AlignVCenter);
 
 		meterLayout->setContentsMargins(0, 0, 0, 0);
 		meterLayout->setSpacing(0);
@@ -377,10 +385,14 @@ VolControl::VolControl(OBSSource source_, bool showConfig, bool vertical)
 	signal_handler_connect(obs_source_get_signal_handler(source), "mute",
 			       OBSVolumeMuted, this);
 	signal_handler_connect(obs_source_get_signal_handler(source),
-			       "audio_mixers", OBSMixersChanged, this);
+			       "audio_mixers", OBSMixersOrMonitoringChanged,
+			       this);
+	signal_handler_connect(obs_source_get_signal_handler(source),
+			       "audio_monitoring", OBSMixersOrMonitoringChanged,
+			       this);
 
-	QWidget::connect(slider, SIGNAL(valueChanged(int)), this,
-			 SLOT(SliderChanged(int)));
+	QWidget::connect(slider, &VolumeSlider::valueChanged, this,
+			 &VolControl::SliderChanged);
 	QWidget::connect(mute, &MuteCheckBox::clicked, this,
 			 &VolControl::SetMuted);
 
@@ -416,10 +428,12 @@ VolControl::~VolControl()
 	signal_handler_disconnect(obs_source_get_signal_handler(source), "mute",
 				  OBSVolumeMuted, this);
 	signal_handler_disconnect(obs_source_get_signal_handler(source),
-				  "audio_mixers", OBSMixersChanged, this);
+				  "audio_mixers", OBSMixersOrMonitoringChanged,
+				  this);
+	signal_handler_disconnect(obs_source_get_signal_handler(source),
+				  "audio_monitoring",
+				  OBSMixersOrMonitoringChanged, this);
 
-	obs_fader_destroy(obs_fader);
-	obs_volmeter_destroy(obs_volmeter);
 	if (contextMenu)
 		contextMenu->close();
 }
@@ -815,7 +829,9 @@ void VolumeMeter::wheelEvent(QWheelEvent *event)
 
 VolumeMeter::VolumeMeter(QWidget *parent, obs_volmeter_t *obs_volmeter,
 			 bool vertical)
-	: QWidget(parent), obs_volmeter(obs_volmeter), vertical(vertical)
+	: QWidget(parent),
+	  obs_volmeter(obs_volmeter),
+	  vertical(vertical)
 {
 	setAttribute(Qt::WA_OpaquePaintEvent, true);
 
@@ -854,9 +870,9 @@ VolumeMeter::VolumeMeter(QWidget *parent, obs_volmeter_t *obs_volmeter,
 	channels = (int)audio_output_get_channels(obs_get_audio());
 
 	doLayout();
-	updateTimerRef = updateTimer.toStrongRef();
+	updateTimerRef = updateTimer.lock();
 	if (!updateTimerRef) {
-		updateTimerRef = QSharedPointer<VolumeMeterTimer>::create();
+		updateTimerRef = std::make_shared<VolumeMeterTimer>();
 		updateTimerRef->setTimerType(Qt::PreciseTimer);
 		updateTimerRef->start(16);
 		updateTimer = updateTimerRef;
@@ -1150,11 +1166,6 @@ void VolumeMeter::paintVTicks(QPainter &painter, int x, int y, int height)
 
 #define CLIP_FLASH_DURATION_MS 1000
 
-void VolumeMeter::ClipEnding()
-{
-	clipping = false;
-}
-
 inline int VolumeMeter::convertToInt(float number)
 {
 	constexpr int min = std::numeric_limits<int>::min();
@@ -1251,7 +1262,7 @@ void VolumeMeter::paintHMeter(QPainter &painter, int x, int y, int width,
 	} else if (int(magnitude) != 0) {
 		if (!clipping) {
 			QTimer::singleShot(CLIP_FLASH_DURATION_MS, this,
-					   SLOT(ClipEnding()));
+					   [&]() { clipping = false; });
 			clipping = true;
 		}
 
@@ -1363,7 +1374,7 @@ void VolumeMeter::paintVMeter(QPainter &painter, int x, int y, int width,
 	} else {
 		if (!clipping) {
 			QTimer::singleShot(CLIP_FLASH_DURATION_MS, this,
-					   SLOT(ClipEnding()));
+					   [&]() { clipping = false; });
 			clipping = true;
 		}
 

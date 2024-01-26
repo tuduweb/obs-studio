@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.16...3.25)
+cmake_minimum_required(VERSION 3.22...3.25)
 
 legacy_check()
 
@@ -16,10 +16,6 @@ endif()
 find_package(FFmpeg REQUIRED COMPONENTS avcodec avutil avformat)
 find_package(CURL REQUIRED)
 
-if(NOT TARGET OBS::libff-util)
-  add_subdirectory("${CMAKE_SOURCE_DIR}/deps/libff" "${CMAKE_BINARY_DIR}/deps/libff")
-endif()
-
 if(NOT TARGET OBS::json11)
   add_subdirectory("${CMAKE_SOURCE_DIR}/deps/json11" "${CMAKE_BINARY_DIR}/deps/json11")
 endif()
@@ -35,7 +31,6 @@ target_link_libraries(
           FFmpeg::avformat
           OBS::libobs
           OBS::frontend-api
-          OBS::libff-util
           OBS::json11)
 
 include(cmake/ui-qt.cmake)
@@ -45,15 +40,15 @@ include(cmake/feature-importers.cmake)
 include(cmake/feature-browserpanels.cmake)
 
 if(NOT OAUTH_BASE_URL)
-  set(OAUTH_BASE_URL
-      "https://auth.obsproject.com/"
-      CACHE STRING "Default OAuth base URL")
-
+  # cmake-format: off
+  set(OAUTH_BASE_URL "https://auth.obsproject.com/" CACHE STRING "Default OAuth base URL")
   mark_as_advanced(OAUTH_BASE_URL)
+  # cmake-format: on
 endif()
 include(cmake/feature-twitch.cmake)
 include(cmake/feature-restream.cmake)
 include(cmake/feature-youtube.cmake)
+include(cmake/feature-sparkle.cmake)
 include(cmake/feature-whatsnew.cmake)
 
 add_subdirectory(frontend-plugins)
@@ -71,6 +66,8 @@ target_sources(
           auth-oauth.cpp
           auth-oauth.hpp
           display-helpers.hpp
+          ffmpeg-utils.cpp
+          ffmpeg-utils.hpp
           multiview.cpp
           multiview.hpp
           obf.c
@@ -82,8 +79,6 @@ target_sources(
           platform.hpp
           qt-display.cpp
           qt-display.hpp
-          qt-wrappers.cpp
-          qt-wrappers.hpp
           ui-config.h
           ui-validation.cpp
           ui-validation.hpp)
@@ -94,7 +89,7 @@ elseif(OS_MACOS)
   include(cmake/os-macos.cmake)
 elseif(OS_LINUX)
   include(cmake/os-linux.cmake)
-elseif(OS_FREEBSD)
+elseif(OS_FREEBSD OR OS_OPENBSD)
   include(cmake/os-freebsd.cmake)
 endif()
 
@@ -108,4 +103,10 @@ foreach(graphics_library IN ITEMS opengl metal d3d11)
   endif()
 endforeach()
 
-set_target_properties_obs(obs-studio PROPERTIES FOLDER frontend OUTPUT_NAME obs)
+get_property(obs_module_list GLOBAL PROPERTY OBS_MODULES_ENABLED)
+list(JOIN obs_module_list "|" SAFE_MODULES)
+target_compile_definitions(obs-studio PRIVATE "SAFE_MODULES=\"${SAFE_MODULES}\"")
+
+# cmake-format: off
+set_target_properties_obs(obs-studio PROPERTIES FOLDER frontend OUTPUT_NAME "$<IF:$<PLATFORM_ID:Windows>,obs64,obs>")
+# cmake-format: on

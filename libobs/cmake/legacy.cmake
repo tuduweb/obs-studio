@@ -4,18 +4,22 @@ endif()
 
 project(libobs)
 
+# cmake-format: off
+add_library(libobs-version STATIC EXCLUDE_FROM_ALL)
+add_library(OBS::libobs-version ALIAS libobs-version)
+# cmake-format: on
+configure_file(obsversion.c.in obsversion.c @ONLY)
+target_sources(libobs-version PRIVATE obsversion.c obsversion.h)
+target_include_directories(libobs-version PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+set_property(TARGET libobs-version PROPERTY FOLDER core)
+
+find_package(Jansson 2.5 REQUIRED)
 find_package(Threads REQUIRED)
 find_package(
   FFmpeg REQUIRED
   COMPONENTS avformat avutil swscale swresample
   OPTIONAL_COMPONENTS avcodec)
 find_package(ZLIB REQUIRED)
-
-if(ENABLE_UI)
-  find_qt(COMPONENTS Core)
-else()
-  set(_QT_VERSION 0)
-endif()
 
 add_library(libobs SHARED)
 add_library(OBS::libobs ALIAS libobs)
@@ -28,6 +32,8 @@ target_sources(
           obs-audio.c
           obs-audio-controls.c
           obs-audio-controls.h
+          obs-av1.c
+          obs-av1.h
           obs-avc.c
           obs-avc.h
           obs-data.c
@@ -62,7 +68,6 @@ target_sources(
           obs-source.h
           obs-source-deinterlace.c
           obs-source-transition.c
-          obs-ui.h
           obs-video.c
           obs-video-gpu-encode.c
           obs-view.c
@@ -180,6 +185,7 @@ target_sources(
           util/config-file.h
           util/crc32.c
           util/crc32.h
+          util/deque.h
           util/dstr.c
           util/dstr.h
           util/file-serializer.c
@@ -249,6 +255,7 @@ target_link_libraries(
           Jansson::Jansson
           OBS::caption
           OBS::uthash
+          OBS::libobs-version
           ZLIB::ZLIB
   PUBLIC Threads::Threads)
 
@@ -304,7 +311,8 @@ if(OS_WINDOWS)
             audio-monitoring/win32/wasapi-monitoring-available.c)
 
   target_compile_definitions(libobs PRIVATE UNICODE _UNICODE _CRT_SECURE_NO_WARNINGS _CRT_NONSTDC_NO_WARNINGS)
-
+  set_source_files_properties(obs-win-crash-handler.c PROPERTIES COMPILE_DEFINITIONS
+                                                                 OBS_VERSION="${OBS_VERSION_CANONICAL}")
   target_link_libraries(libobs PRIVATE dxgi Avrt Dwmapi winmm Rpcrt4)
 
   if(MSVC)
@@ -313,6 +321,21 @@ if(OS_WINDOWS)
     target_compile_options(libobs PRIVATE "$<$<COMPILE_LANGUAGE:C>:/EHc->" "$<$<COMPILE_LANGUAGE:CXX>:/EHc->")
 
     target_link_options(libobs PRIVATE "LINKER:/IGNORE:4098" "LINKER:/SAFESEH:NO")
+
+    add_library(obs-obfuscate INTERFACE)
+    add_library(OBS::obfuscate ALIAS obs-obfuscate)
+    target_sources(obs-obfuscate INTERFACE util/windows/obfuscate.c util/windows/obfuscate.h)
+    target_include_directories(obs-obfuscate INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}")
+
+    add_library(obs-comutils INTERFACE)
+    add_library(OBS::COMutils ALIAS obs-comutils)
+    target_sources(obs-comutils INTERFACE util/windows/ComPtr.hpp)
+    target_include_directories(obs-comutils INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}")
+
+    add_library(obs-winhandle INTERFACE)
+    add_library(OBS::winhandle ALIAS obs-winhandle)
+    target_sources(obs-winhandle INTERFACE util/windows/WinHandle.hpp)
+    target_include_directories(obs-winhandle INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}")
   endif()
 
 elseif(OS_MACOS)
@@ -448,8 +471,7 @@ configure_file(${CMAKE_CURRENT_SOURCE_DIR}/obsconfig.h.in ${CMAKE_BINARY_DIR}/co
 target_compile_definitions(
   libobs
   PUBLIC HAVE_OBSCONFIG_H
-  PRIVATE "OBS_INSTALL_PREFIX=\"${OBS_INSTALL_PREFIX}\"" "OBS_QT_VERSION=${_QT_VERSION}"
-          "$<$<BOOL:${LINUX_PORTABLE}>:LINUX_PORTABLE>")
+  PRIVATE "OBS_INSTALL_PREFIX=\"${OBS_INSTALL_PREFIX}\"" "$<$<BOOL:${LINUX_PORTABLE}>:LINUX_PORTABLE>")
 
 if(ENABLE_FFMPEG_MUX_DEBUG)
   target_compile_definitions(libobs PRIVATE SHOW_SUBPROCESSES)

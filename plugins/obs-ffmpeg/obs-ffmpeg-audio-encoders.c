@@ -1,5 +1,5 @@
 /******************************************************************************
-    Copyright (C) 2014 by Hugh Bailey <obs.jim@gmail.com>
+    Copyright (C) 2023 by Lain Bailey <lain@obsproject.com>
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -16,7 +16,7 @@
 ******************************************************************************/
 
 #include <util/base.h>
-#include <util/circlebuf.h>
+#include <util/deque.h>
 #include <util/darray.h>
 #include <util/dstr.h>
 #include <obs-module.h>
@@ -217,10 +217,6 @@ static void *enc_create(obs_data_t *settings, obs_encoder_t *encoder,
 	int bitrate = (int)obs_data_get_int(settings, "bitrate");
 	audio_t *audio = obs_encoder_audio(encoder);
 
-#if LIBAVCODEC_VERSION_INT < AV_VERSION_INT(58, 9, 100)
-	avcodec_register_all();
-#endif
-
 	enc = bzalloc(sizeof(struct enc_encoder));
 	enc->encoder = encoder;
 	enc->codec = avcodec_find_encoder_by_name(type);
@@ -342,7 +338,7 @@ static void *enc_create(obs_data_t *settings, obs_encoder_t *encoder,
 	/* enable experimental FFmpeg encoder if the only one available */
 	enc->context->strict_std_compliance = -2;
 
-	enc->context->flags = CODEC_FLAG_GLOBAL_H;
+	enc->context->flags = AV_CODEC_FLAG_GLOBAL_HEADER;
 
 	if (initialize_codec(enc))
 		return enc;
@@ -421,7 +417,6 @@ static bool do_encode(struct enc_encoder *enc, struct encoder_packet *packet,
 
 	enc->total_samples += enc->frame_size;
 
-#if LIBAVFORMAT_VERSION_INT >= AV_VERSION_INT(57, 40, 101)
 	ret = avcodec_send_frame(enc->context, enc->aframe);
 	if (ret == 0)
 		ret = avcodec_receive_packet(enc->context, &avpacket);
@@ -430,10 +425,6 @@ static bool do_encode(struct enc_encoder *enc, struct encoder_packet *packet,
 
 	if (ret == AVERROR_EOF || ret == AVERROR(EAGAIN))
 		ret = 0;
-#else
-	ret = avcodec_encode_audio2(enc->context, &avpacket, enc->aframe,
-				    &got_packet);
-#endif
 	if (ret < 0) {
 		warn("avcodec_encode_audio2 failed: %s", av_err2str(ret));
 		return false;
@@ -453,7 +444,7 @@ static bool do_encode(struct enc_encoder *enc, struct encoder_packet *packet,
 	packet->type = OBS_ENCODER_AUDIO;
 	packet->timebase_num = 1;
 	packet->timebase_den = (int32_t)enc->context->sample_rate;
-	av_free_packet(&avpacket);
+	av_packet_unref(&avpacket);
 	return true;
 }
 

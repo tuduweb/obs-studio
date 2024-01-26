@@ -1,5 +1,5 @@
 /******************************************************************************
-    Copyright (C) 2013-2014 by Hugh Bailey <obs.jim@gmail.com>
+    Copyright (C) 2023 by Lain Bailey <lain@obsproject.com>
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -45,34 +45,41 @@ static uint64_t tick_sources(uint64_t cur_time, uint64_t last_time)
 	/* ------------------------------------- */
 	/* call tick callbacks                   */
 
-	pthread_mutex_lock(&obs->data.draw_callbacks_mutex);
+	pthread_mutex_lock(&data->draw_callbacks_mutex);
 
-	for (size_t i = obs->data.tick_callbacks.num; i > 0; i--) {
+	for (size_t i = data->tick_callbacks.num; i > 0; i--) {
 		struct tick_callback *callback;
-		callback = obs->data.tick_callbacks.array + (i - 1);
+		callback = data->tick_callbacks.array + (i - 1);
 		callback->tick(callback->param, seconds);
 	}
 
-	pthread_mutex_unlock(&obs->data.draw_callbacks_mutex);
+	pthread_mutex_unlock(&data->draw_callbacks_mutex);
 
 	/* ------------------------------------- */
-	/* call the tick function of each source */
+	/* get an array of all sources to tick   */
+
+	da_clear(data->sources_to_tick);
 
 	pthread_mutex_lock(&data->sources_mutex);
 
 	source = data->sources;
 	while (source) {
 		obs_source_t *s = obs_source_get_ref(source);
-
-		if (s) {
-			obs_source_video_tick(s, seconds);
-			obs_source_release(s);
-		}
-
+		if (s)
+			da_push_back(data->sources_to_tick, &s);
 		source = (struct obs_source *)source->context.hh_uuid.next;
 	}
 
 	pthread_mutex_unlock(&data->sources_mutex);
+
+	/* ------------------------------------- */
+	/* call the tick function of each source */
+
+	for (size_t i = 0; i < data->sources_to_tick.num; i++) {
+		obs_source_t *s = data->sources_to_tick.array[i];
+		obs_source_video_tick(s, seconds);
+		obs_source_release(s);
+	}
 
 	return cur_time;
 }
@@ -122,6 +129,44 @@ static inline void unmap_last_surface(struct obs_core_video_mix *video)
 	}
 }
 
+static inline bool can_reuse_mix_texture(const struct obs_core_video_mix *mix,
+					 size_t *idx)
+{
+	for (size_t i = 0, num = obs->video.mixes.num; i < num; i++) {
+		const struct obs_core_video_mix *other =
+			obs->video.mixes.array[i];
+		if (other == mix)
+			break;
+		if (other->view != mix->view)
+			continue;
+		if (other->render_space != mix->render_space)
+			continue;
+		if (other->ovi.base_width != mix->ovi.base_width ||
+		    other->ovi.base_height != mix->ovi.base_height)
+			continue;
+		if (!other->texture_rendered)
+			continue;
+
+		*idx = i;
+		return true;
+	}
+
+	return false;
+}
+
+static inline void draw_mix_texture(const size_t mix_idx)
+{
+	gs_texture_t *tex = obs->video.mixes.array[mix_idx]->render_texture;
+	gs_effect_t *effect = obs_get_base_effect(OBS_EFFECT_DEFAULT);
+	gs_eparam_t *param = gs_effect_get_param_by_name(effect, "image");
+	gs_effect_set_texture_srgb(param, tex);
+
+	gs_enable_framebuffer_srgb(true);
+	while (gs_effect_loop(effect, "Draw"))
+		gs_draw_sprite(tex, 0, 0, 0);
+	gs_enable_framebuffer_srgb(false);
+}
+
 static const char *render_main_texture_name = "render_main_texture";
 static inline void render_main_texture(struct obs_core_video_mix *video)
 {
@@ -151,7 +196,12 @@ static inline void render_main_texture(struct obs_core_video_mix *video)
 
 	pthread_mutex_unlock(&obs->data.draw_callbacks_mutex);
 
-	obs_view_render(video->view);
+	/* In some cases we can reuse a previous mix's texture and save re-rendering everything */
+	size_t reuse_idx;
+	if (can_reuse_mix_texture(video, &reuse_idx))
+		draw_mix_texture(reuse_idx);
+	else
+		obs_view_render(video->view);
 
 	video->texture_rendered = true;
 
@@ -437,9 +487,9 @@ static inline bool queue_frame(struct obs_core_video_mix *video,
 		(video->gpu_encoder_queue.size && vframe_info->count > 1);
 
 	if (duplicate) {
-		struct obs_tex_frame *tf = circlebuf_data(
-			&video->gpu_encoder_queue,
-			video->gpu_encoder_queue.size - sizeof(*tf));
+		struct obs_tex_frame *tf =
+			deque_data(&video->gpu_encoder_queue,
+				   video->gpu_encoder_queue.size - sizeof(*tf));
 
 		/* texture-based encoding is stopping */
 		if (!tf) {
@@ -452,7 +502,7 @@ static inline bool queue_frame(struct obs_core_video_mix *video,
 	}
 
 	struct obs_tex_frame tf;
-	circlebuf_pop_front(&video->gpu_encoder_avail_queue, &tf, sizeof(tf));
+	deque_pop_front(&video->gpu_encoder_avail_queue, &tf, sizeof(tf));
 
 	if (tf.released) {
 		gs_texture_acquire_sync(tf.tex, tf.lock_key, GS_WAIT_INFINITE);
@@ -481,7 +531,7 @@ static inline bool queue_frame(struct obs_core_video_mix *video,
 	tf.released = true;
 	tf.handle = gs_texture_get_shared_handle(tf.tex);
 	gs_texture_release_sync(tf.tex, ++tf.lock_key);
-	circlebuf_push_back(&video->gpu_encoder_queue, &tf, sizeof(tf));
+	deque_push_back(&video->gpu_encoder_queue, &tf, sizeof(tf));
 
 	os_sem_post(video->gpu_encode_semaphore);
 
@@ -510,8 +560,8 @@ static void output_gpu_encoders(struct obs_core_video_mix *video,
 		goto end;
 
 	struct obs_vframe_info vframe_info;
-	circlebuf_pop_front(&video->vframe_info_buffer_gpu, &vframe_info,
-			    sizeof(vframe_info));
+	deque_pop_front(&video->vframe_info_buffer_gpu, &vframe_info,
+			sizeof(vframe_info));
 
 	pthread_mutex_lock(&video->gpu_encoder_mutex);
 	encode_gpu(video, raw_active, &vframe_info);
@@ -780,6 +830,7 @@ static void set_gpu_converted_data(struct video_frame *output,
 	case VIDEO_FORMAT_YA2L:
 	case VIDEO_FORMAT_AYUV:
 	case VIDEO_FORMAT_V210:
+	case VIDEO_FORMAT_R10L:
 		/* unimplemented */
 		;
 	}
@@ -864,11 +915,11 @@ static inline void video_sleep(struct obs_core_video *video, uint64_t *p_time,
 		bool gpu_active = video->gpu_was_active;
 
 		if (raw_active)
-			circlebuf_push_back(&video->vframe_info_buffer,
-					    &vframe_info, sizeof(vframe_info));
+			deque_push_back(&video->vframe_info_buffer,
+					&vframe_info, sizeof(vframe_info));
 		if (gpu_active)
-			circlebuf_push_back(&video->vframe_info_buffer_gpu,
-					    &vframe_info, sizeof(vframe_info));
+			deque_push_back(&video->vframe_info_buffer_gpu,
+					&vframe_info, sizeof(vframe_info));
 	}
 	pthread_mutex_unlock(&obs->video.mixes_mutex);
 }
@@ -916,8 +967,8 @@ static inline void output_frame(struct obs_core_video_mix *video)
 
 	if (raw_active && frame_ready) {
 		struct obs_vframe_info vframe_info;
-		circlebuf_pop_front(&video->vframe_info_buffer, &vframe_info,
-				    sizeof(vframe_info));
+		deque_pop_front(&video->vframe_info_buffer, &vframe_info,
+				sizeof(vframe_info));
 
 		frame.timestamp = vframe_info.timestamp;
 		profile_start(output_frame_output_video_data_name);
@@ -953,20 +1004,20 @@ static void clear_base_frame_data(struct obs_core_video_mix *video)
 {
 	video->texture_rendered = false;
 	video->texture_converted = false;
-	circlebuf_free(&video->vframe_info_buffer);
+	deque_free(&video->vframe_info_buffer);
 	video->cur_texture = 0;
 }
 
 static void clear_raw_frame_data(struct obs_core_video_mix *video)
 {
 	memset(video->textures_copied, 0, sizeof(video->textures_copied));
-	circlebuf_free(&video->vframe_info_buffer);
+	deque_free(&video->vframe_info_buffer);
 }
 
 #ifdef _WIN32
 static void clear_gpu_frame_data(struct obs_core_video_mix *video)
 {
-	circlebuf_free(&video->vframe_info_buffer_gpu);
+	deque_free(&video->vframe_info_buffer_gpu);
 }
 #endif
 
@@ -981,7 +1032,7 @@ static void execute_graphics_tasks(void)
 		pthread_mutex_lock(&video->task_mutex);
 		if (video->tasks.size) {
 			struct obs_task_info info;
-			circlebuf_pop_front(&video->tasks, &info, sizeof(info));
+			deque_pop_front(&video->tasks, &info, sizeof(info));
 			info.task(info.param);
 		}
 		tasks_remaining = !!video->tasks.size;

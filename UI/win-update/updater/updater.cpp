@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017-2018 Hugh Bailey <obs.jim@gmail.com>
+ * Copyright (c) 2023 Lain Bailey <lain@obsproject.com>
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -15,20 +15,30 @@
  */
 
 #include "updater.hpp"
+#include "manifest.hpp"
 
 #include <psapi.h>
 
 #include <util/windows/CoTaskMemPtr.hpp>
 
 #include <future>
-#include <vector>
 #include <string>
+#include <string_view>
 #include <mutex>
 #include <unordered_set>
 #include <queue>
 
 using namespace std;
-using namespace json11;
+using namespace updater;
+
+/* ----------------------------------------------------------------------- */
+
+constexpr const string_view kCDNUrl = "https://cdn-fastly.obsproject.com/";
+constexpr const wchar_t *kCDNHostname = L"cdn-fastly.obsproject.com";
+constexpr const wchar_t *kCDNUpdateBaseUrl =
+	L"https://cdn-fastly.obsproject.com/update_studio";
+constexpr const wchar_t *kPatchManifestURL =
+	L"https://obsproject.com/update_studio/getpatchmanifest";
 
 /* ----------------------------------------------------------------------- */
 
@@ -43,8 +53,8 @@ static bool updateFailed = false;
 
 static bool downloadThreadFailure = false;
 
-int totalFileSize = 0;
-int completedFileSize = 0;
+size_t totalFileSize = 0;
+size_t completedFileSize = 0;
 static int completedUpdates = 0;
 
 static wchar_t tempPath[MAX_PATH];
@@ -116,20 +126,6 @@ static void Status(const wchar_t *fmt, ...)
 	va_end(argptr);
 }
 
-static void CreateFoldersForPath(const wchar_t *path)
-{
-	wchar_t *p = (wchar_t *)path;
-
-	while (*p) {
-		if (*p == '\\' || *p == '/') {
-			*p = 0;
-			CreateDirectory(path, nullptr);
-			*p = '\\';
-		}
-		p++;
-	}
-}
-
 static bool MyCopyFile(const wchar_t *src, const wchar_t *dest)
 try {
 	WinHandle hSrc;
@@ -164,7 +160,7 @@ try {
 
 	return true;
 
-} catch (LastError error) {
+} catch (LastError &error) {
 	SetLastError(error.code);
 	return false;
 }
@@ -180,7 +176,7 @@ static void MyDeleteFile(const wstring &filename)
 		return;
 
 	/* If all else fails, schedule the file to be deleted on reboot */
-	MoveFileEx(filename.c_str(), NULL, MOVEFILE_DELAY_UNTIL_REBOOT);
+	MoveFileEx(filename.c_str(), nullptr, MOVEFILE_DELAY_UNTIL_REBOOT);
 }
 
 static bool IsSafeFilename(const wchar_t *path)
@@ -213,29 +209,60 @@ static string QuickReadFile(const wchar_t *path)
 	WinHandle handle = CreateFileW(path, GENERIC_READ, 0, nullptr,
 				       OPEN_EXISTING, 0, nullptr);
 	if (!handle.Valid()) {
-		return string();
+		return {};
 	}
 
 	LARGE_INTEGER size;
 
 	if (!GetFileSizeEx(handle, &size)) {
-		return string();
+		return {};
 	}
 
 	data.resize((size_t)size.QuadPart);
 
 	DWORD read;
-	if (!ReadFile(handle, &data[0], (DWORD)data.size(), &read, nullptr)) {
-		return string();
+	if (!ReadFile(handle, data.data(), (DWORD)data.size(), &read,
+		      nullptr)) {
+		return {};
 	}
 	if (read != size.QuadPart) {
-		return string();
+		return {};
 	}
 
 	return data;
 }
 
+static bool QuickWriteFile(const wchar_t *file, const void *data, size_t size)
+try {
+	WinHandle handle = CreateFile(file, GENERIC_WRITE, 0, nullptr,
+				      CREATE_ALWAYS, FILE_FLAG_WRITE_THROUGH,
+				      nullptr);
+
+	if (handle == INVALID_HANDLE_VALUE)
+		throw GetLastError();
+
+	DWORD written;
+	if (!WriteFile(handle, data, (DWORD)size, &written, nullptr))
+		throw GetLastError();
+
+	return true;
+
+} catch (LastError &error) {
+	SetLastError(error.code);
+	return false;
+}
+
 /* ----------------------------------------------------------------------- */
+
+/* Extend std::hash for B2Hash */
+template<> struct std::hash<B2Hash> {
+	size_t operator()(const B2Hash &value) const noexcept
+	{
+		return hash<string_view>{}(string_view(
+			reinterpret_cast<const char *>(value.data()),
+			value.size()));
+	}
+};
 
 enum state_t {
 	STATE_INVALID,
@@ -250,46 +277,31 @@ enum state_t {
 struct update_t {
 	wstring sourceURL;
 	wstring outputPath;
-	wstring tempPath;
 	wstring previousFile;
-	wstring basename;
 	string packageName;
 
-	DWORD fileSize = 0;
-	BYTE hash[BLAKE2_HASH_LENGTH];
-	BYTE downloadhash[BLAKE2_HASH_LENGTH];
-	BYTE my_hash[BLAKE2_HASH_LENGTH];
+	B2Hash hash;
+	B2Hash my_hash;
+	B2Hash downloadHash;
+
+	size_t fileSize = 0;
 	state_t state = STATE_INVALID;
 	bool has_hash = false;
 	bool patchable = false;
 	bool compressed = false;
 
-	inline update_t() {}
-	inline update_t(const update_t &from)
-		: sourceURL(from.sourceURL),
-		  outputPath(from.outputPath),
-		  tempPath(from.tempPath),
-		  previousFile(from.previousFile),
-		  basename(from.basename),
-		  packageName(from.packageName),
-		  fileSize(from.fileSize),
-		  state(from.state),
-		  has_hash(from.has_hash),
-		  patchable(from.patchable),
-		  compressed(from.compressed)
-	{
-		memcpy(hash, from.hash, sizeof(hash));
-		memcpy(downloadhash, from.downloadhash, sizeof(downloadhash));
-		memcpy(my_hash, from.my_hash, sizeof(my_hash));
-	}
+	update_t() = default;
 
-	inline update_t(update_t &&from)
+	update_t(const update_t &from) = default;
+
+	update_t(update_t &&from) noexcept
 		: sourceURL(std::move(from.sourceURL)),
 		  outputPath(std::move(from.outputPath)),
-		  tempPath(std::move(from.tempPath)),
 		  previousFile(std::move(from.previousFile)),
-		  basename(std::move(from.basename)),
 		  packageName(std::move(from.packageName)),
+		  hash(from.hash),
+		  my_hash(from.my_hash),
+		  downloadHash(from.downloadHash),
 		  fileSize(from.fileSize),
 		  state(from.state),
 		  has_hash(from.has_hash),
@@ -297,13 +309,9 @@ struct update_t {
 		  compressed(from.compressed)
 	{
 		from.state = STATE_INVALID;
-
-		memcpy(hash, from.hash, sizeof(hash));
-		memcpy(downloadhash, from.downloadhash, sizeof(downloadhash));
-		memcpy(my_hash, from.my_hash, sizeof(my_hash));
 	}
 
-	void CleanPartialUpdate()
+	void CleanPartialUpdate() const
 	{
 		if (state == STATE_INSTALL_FAILED || state == STATE_INSTALLED) {
 			if (!previousFile.empty()) {
@@ -314,40 +322,17 @@ struct update_t {
 			} else {
 				DeleteFile(outputPath.c_str());
 			}
-			if (state == STATE_INSTALL_FAILED)
-				DeleteFile(tempPath.c_str());
-		} else if (state == STATE_DOWNLOADED) {
-			DeleteFile(tempPath.c_str());
 		}
 	}
 
-	inline update_t &operator=(const update_t &from)
-	{
-		sourceURL = from.sourceURL;
-		outputPath = from.outputPath;
-		tempPath = from.tempPath;
-		previousFile = from.previousFile;
-		basename = from.basename;
-		packageName = from.packageName;
-		fileSize = from.fileSize;
-		state = from.state;
-		has_hash = from.has_hash;
-		patchable = from.patchable;
-		compressed = from.compressed;
-
-		memcpy(hash, from.hash, sizeof(hash));
-		memcpy(downloadhash, from.downloadhash, sizeof(downloadhash));
-		memcpy(my_hash, from.my_hash, sizeof(my_hash));
-
-		return *this;
-	}
+	update_t &operator=(const update_t &from) = default;
 };
 
 struct deletion_t {
 	wstring originalFilename;
 	wstring deleteMeFilename;
 
-	void UndoRename()
+	void UndoRename() const
 	{
 		if (!deleteMeFilename.empty())
 			MoveFile(deleteMeFilename.c_str(),
@@ -355,7 +340,8 @@ struct deletion_t {
 	}
 };
 
-static unordered_map<string, wstring> hashes;
+static unordered_map<B2Hash, vector<std::byte>> download_data;
+static unordered_map<string, B2Hash> hashes;
 static vector<update_t> updates;
 static vector<deletion_t> deletions;
 static mutex updateMutex;
@@ -370,6 +356,29 @@ static inline void CleanupPartialUpdates()
 }
 
 /* ----------------------------------------------------------------------- */
+
+static int Decompress(ZSTD_DCtx *ctx, std::vector<std::byte> &buf, size_t size)
+{
+	// Copy compressed data
+	vector<std::byte> comp(buf.begin(), buf.end());
+
+	try {
+		buf.resize(size);
+	} catch (...) {
+		return -1;
+	}
+
+	// Overwrite buffer with decompressed data
+	size_t result = ZSTD_decompressDCtx(ctx, buf.data(), buf.size(),
+					    comp.data(), comp.size());
+
+	if (result != size)
+		return -9;
+	if (ZSTD_isError(result))
+		return -10;
+
+	return 0;
+}
 
 bool DownloadWorkerThread()
 {
@@ -399,12 +408,11 @@ bool DownloadWorkerThread()
 	WinHttpSetOption(hSession, WINHTTP_OPTION_DECOMPRESSION,
 			 (LPVOID)&compressionFlags, sizeof(compressionFlags));
 
-	HttpHandle hConnect = WinHttpConnect(hSession,
-					     L"cdn-fastly.obsproject.com",
+	HttpHandle hConnect = WinHttpConnect(hSession, kCDNHostname,
 					     INTERNET_DEFAULT_HTTPS_PORT, 0);
 	if (!hConnect) {
 		downloadThreadFailure = true;
-		Status(L"Update failed: Couldn't connect to cdn-fastly.obsproject.com");
+		Status(L"Update failed: Couldn't connect to %S", kCDNHostname);
 		return false;
 	}
 
@@ -437,61 +445,51 @@ bool DownloadWorkerThread()
 				return false;
 			}
 
-			Status(L"Downloading %s", update.outputPath.c_str());
+			auto &buf = download_data[update.downloadHash];
+			/* Reserve required memory */
+			buf.reserve(update.fileSize);
 
-			if (!HTTPGetFile(hConnect, update.sourceURL.c_str(),
-					 update.tempPath.c_str(),
-					 L"Accept-Encoding: gzip",
-					 &responseCode)) {
-
+			if (!HTTPGetBuffer(hConnect, update.sourceURL.c_str(),
+					   L"Accept-Encoding: gzip", buf,
+					   &responseCode)) {
 				downloadThreadFailure = true;
-				DeleteFile(update.tempPath.c_str());
 				Status(L"Update failed: Could not download "
 				       L"%s (error code %d)",
 				       update.outputPath.c_str(), responseCode);
-				return 1;
+				return true;
 			}
 
 			if (responseCode != 200) {
 				downloadThreadFailure = true;
-				DeleteFile(update.tempPath.c_str());
 				Status(L"Update failed: Could not download "
 				       L"%s (error code %d)",
 				       update.outputPath.c_str(), responseCode);
-				return 1;
+				return true;
 			}
 
-			BYTE downloadHash[BLAKE2_HASH_LENGTH];
-			if (!CalculateFileHash(update.tempPath.c_str(),
-					       downloadHash)) {
-				downloadThreadFailure = true;
-				DeleteFile(update.tempPath.c_str());
-				Status(L"Update failed: Couldn't verify "
-				       L"integrity of %s",
-				       update.outputPath.c_str());
-				return 1;
-			}
+			/* Validate hash of downloaded data. */
+			B2Hash dataHash;
+			blake2b(dataHash.data(), dataHash.size(), buf.data(),
+				buf.size(), nullptr, 0);
 
-			if (memcmp(update.downloadhash, downloadHash, 20)) {
+			if (dataHash != update.downloadHash) {
 				downloadThreadFailure = true;
-				DeleteFile(update.tempPath.c_str());
 				Status(L"Update failed: Integrity check "
 				       L"failed on %s",
 				       update.outputPath.c_str());
-				return 1;
+				return true;
 			}
 
+			/* Decompress data in compressed buffer. */
 			if (update.compressed && !update.patchable) {
-				int res = DecompressFile(
-					zCtx, update.tempPath.c_str(),
-					update.fileSize);
+				int res =
+					Decompress(zCtx, buf, update.fileSize);
 				if (res) {
 					downloadThreadFailure = true;
-					DeleteFile(update.tempPath.c_str());
 					Status(L"Update failed: Decompression "
 					       L"failed on %s (error code %d)",
 					       update.outputPath.c_str(), res);
-					return 1;
+					return true;
 				}
 			}
 
@@ -534,9 +532,7 @@ try {
 
 /* ----------------------------------------------------------------------- */
 
-#define WAITIFOBS_SUCCESS 0
-#define WAITIFOBS_WRONG_PROCESS 1
-#define WAITIFOBS_CANCELLED 2
+enum { WAITIFOBS_SUCCESS, WAITIFOBS_WRONG_PROCESS, WAITIFOBS_CANCELLED };
 
 static inline DWORD WaitIfOBS(DWORD id, const wchar_t *expected)
 {
@@ -557,7 +553,7 @@ static inline DWORD WaitIfOBS(DWORD id, const wchar_t *expected)
 
 	// check it's actually our exe that's running
 	size_t len = wcslen(obs_base_directory);
-	if (wcsncmp(path, obs_base_directory, len))
+	if (wcsncmp(path, obs_base_directory, len) != 0)
 		return WAITIFOBS_WRONG_PROCESS;
 
 	name = wcsrchr(path, L'\\');
@@ -630,8 +626,7 @@ queue<string> hashQueue;
 
 void HasherThread()
 {
-	bool hasherThreadFailure = false;
-	unique_lock<mutex> ulock(updateMutex, defer_lock);
+	unique_lock ulock(updateMutex, defer_lock);
 
 	while (true) {
 		ulock.lock();
@@ -650,26 +645,21 @@ void HasherThread()
 		if (!IsSafeFilename(updateFileName))
 			continue;
 
-		BYTE existingHash[BLAKE2_HASH_LENGTH];
-		wchar_t fileHashStr[BLAKE2_HASH_STR_LENGTH];
-
+		B2Hash existingHash;
 		if (CalculateFileHash(updateFileName, existingHash)) {
-			HashToString(existingHash, fileHashStr);
 			ulock.lock();
-			hashes.emplace(fileName, fileHashStr);
+			hashes.emplace(fileName, existingHash);
 			ulock.unlock();
 		}
 	}
 }
 
-static void RunHasherWorkers(int num, const Json &packages)
+static void RunHasherWorkers(int num, const vector<Package> &packages)
 try {
 
-	for (const Json &package : packages.array_items()) {
-		for (const Json &file : package["files"].array_items()) {
-			if (!file["name"].is_string())
-				continue;
-			hashQueue.push(file["name"].string_value());
+	for (const Package &package : packages) {
+		for (const File &file : package.files) {
+			hashQueue.push(file.name);
 		}
 	}
 
@@ -707,74 +697,32 @@ static bool NonCorePackageInstalled(const char *name)
 	return false;
 }
 
-#define UPDATE_URL L"https://cdn-fastly.obsproject.com/update_studio"
-
-static bool AddPackageUpdateFiles(const Json &root, size_t idx,
-				  const wchar_t *tempPath,
-				  const wchar_t *branch)
+static bool AddPackageUpdateFiles(const Package &package, const wchar_t *branch)
 {
-	const Json &package = root[idx];
-	const Json &name = package["name"];
-	const Json &files = package["files"];
-
-	if (!files.is_array())
-		return true;
-	if (!name.is_string())
-		return true;
-
 	wchar_t wPackageName[512];
-	const string &packageName = name.string_value();
-	size_t fileCount = files.array_items().size();
-
-	if (!UTF8ToWideBuf(wPackageName, packageName.c_str()))
+	if (!UTF8ToWideBuf(wPackageName, package.name.c_str()))
 		return false;
 
-	if (packageName != "core" &&
-	    !NonCorePackageInstalled(packageName.c_str()))
+	if (package.name != "core" &&
+	    !NonCorePackageInstalled(package.name.c_str()))
 		return true;
 
-	for (size_t j = 0; j < fileCount; j++) {
-		const Json &file = files[j];
-		const Json &fileName = file["name"];
-		const Json &hash = file["hash"];
-		const Json &dlHash = file["compressed_hash"];
-		const Json &size = file["size"];
-
-		if (!fileName.is_string())
-			continue;
-		if (!hash.is_string())
-			continue;
-		if (!size.is_number())
-			continue;
-
-		const string &fileUTF8 = fileName.string_value();
-		const string &hashUTF8 = hash.string_value();
-		const string &dlHashUTF8 = dlHash.string_value();
-		int fileSize = size.int_value();
-
-		if (hashUTF8.size() != BLAKE2_HASH_LENGTH * 2)
+	for (const File &file : package.files) {
+		if (file.hash.size() != kBlake2StrLength)
 			continue;
 
 		/* The download hash may not exist if a file is uncompressed */
 
 		bool compressed = false;
-		if (dlHashUTF8.size() == BLAKE2_HASH_LENGTH * 2)
+		if (file.compressed_hash.size() == kBlake2StrLength)
 			compressed = true;
 
 		/* convert strings to wide */
 
 		wchar_t sourceURL[1024];
 		wchar_t updateFileName[MAX_PATH];
-		wchar_t updateHashStr[BLAKE2_HASH_STR_LENGTH];
-		wchar_t downloadHashStr[BLAKE2_HASH_STR_LENGTH];
-		wchar_t tempFilePath[MAX_PATH];
 
-		if (!UTF8ToWideBuf(updateFileName, fileUTF8.c_str()))
-			continue;
-		if (!UTF8ToWideBuf(updateHashStr, hashUTF8.c_str()))
-			continue;
-		if (compressed &&
-		    !UTF8ToWideBuf(downloadHashStr, dlHashUTF8.c_str()))
+		if (!UTF8ToWideBuf(updateFileName, file.name.c_str()))
 			continue;
 
 		/* make sure paths are safe */
@@ -787,76 +735,61 @@ static bool AddPackageUpdateFiles(const Json &root, size_t idx,
 		}
 
 		StringCbPrintf(sourceURL, sizeof(sourceURL), L"%s/%s/%s/%s",
-			       UPDATE_URL, branch, wPackageName,
+			       kCDNUpdateBaseUrl, branch, wPackageName,
 			       updateFileName);
-		StringCbPrintf(tempFilePath, sizeof(tempFilePath), L"%s\\%s",
-			       tempPath, updateHashStr);
 
-		/* Check file hash */
-
-		wstring fileHashStr;
-		bool has_hash;
+		/* Convert hashes */
+		B2Hash updateHash;
+		StringToHash(file.hash, updateHash);
 
 		/* We don't really care if this fails, it's just to avoid
 		 * wasting bandwidth by downloading unmodified files */
-		if (hashes.count(fileUTF8)) {
-			fileHashStr = hashes[fileUTF8];
-			if (fileHashStr == updateHashStr)
+		B2Hash localFileHash;
+		bool has_hash = false;
+
+		if (hashes.count(file.name)) {
+			localFileHash = hashes[file.name];
+			if (localFileHash == updateHash)
 				continue;
 
 			has_hash = true;
-		} else {
-			has_hash = false;
 		}
 
 		/* Add update file */
-
 		update_t update;
-		update.fileSize = fileSize;
-		update.basename = updateFileName;
+		update.fileSize = file.size;
 		update.outputPath = updateFileName;
-		update.tempPath = tempFilePath;
 		update.sourceURL = sourceURL;
-		update.packageName = packageName;
+		update.packageName = package.name;
 		update.state = STATE_PENDING_DOWNLOAD;
 		update.patchable = false;
 		update.compressed = compressed;
-
-		StringToHash(updateHashStr, update.hash);
+		update.hash = updateHash;
 
 		if (compressed) {
 			update.sourceURL += L".zst";
-			StringToHash(downloadHashStr, update.downloadhash);
+			StringToHash(file.compressed_hash, update.downloadHash);
 		} else {
-			memcpy(update.downloadhash, update.hash,
-			       sizeof(update.downloadhash));
+			update.downloadHash = updateHash;
 		}
 
 		update.has_hash = has_hash;
 		if (has_hash)
-			StringToHash(fileHashStr.data(), update.my_hash);
+			update.my_hash = localFileHash;
 
-		updates.push_back(move(update));
+		updates.push_back(std::move(update));
 
-		totalFileSize += fileSize;
+		totalFileSize += file.size;
 	}
 
 	return true;
 }
 
-static void AddPackageRemovedFiles(const Json &package)
+static void AddPackageRemovedFiles(const Package &package)
 {
-	const Json &removed_files = package["removed_files"];
-	if (!removed_files.is_array())
-		return;
-
-	for (auto &item : removed_files.array_items()) {
-		if (!item.is_string())
-			continue;
-
+	for (const string &filename : package.removed_files) {
 		wchar_t removedFileName[MAX_PATH];
-		if (!UTF8ToWideBuf(removedFileName,
-				   item.string_value().c_str()))
+		if (!UTF8ToWideBuf(removedFileName, filename.c_str()))
 			continue;
 
 		/* Ensure paths are safe, also check if file exists */
@@ -885,11 +818,16 @@ static bool RenameRemovedFile(deletion_t &deletion)
 	_TCHAR randomStr[MAX_PATH];
 
 	BYTE junk[40];
-	BYTE hash[BLAKE2_HASH_LENGTH];
+	B2Hash hash;
+	string temp;
 
 	CryptGenRandom(hProvider, sizeof(junk), junk);
-	blake2b(hash, sizeof(hash), junk, sizeof(junk), NULL, 0);
-	HashToString(hash, randomStr);
+	blake2b(hash.data(), hash.size(), junk, sizeof(junk), nullptr, 0);
+	HashToString(hash, temp);
+
+	if (!UTF8ToWideBuf(randomStr, temp.c_str()))
+		return false;
+
 	randomStr[8] = 0;
 
 	StringCbCopy(deleteMeName, sizeof(deleteMeName),
@@ -908,71 +846,60 @@ static bool RenameRemovedFile(deletion_t &deletion)
 	return false;
 }
 
-static void UpdateWithPatchIfAvailable(const char *name, const char *hash,
-				       const char *source, int size)
+static void UpdateWithPatchIfAvailable(const PatchResponse &patch)
 {
 	wchar_t widePatchableFilename[MAX_PATH];
-	wchar_t widePatchHash[MAX_PATH];
 	wchar_t sourceURL[1024];
-	wchar_t patchHashStr[BLAKE2_HASH_STR_LENGTH];
 
-	if (strncmp(source, "https://cdn-fastly.obsproject.com/", 34) != 0)
+	if (patch.source.compare(0, kCDNUrl.size(), kCDNUrl) != 0)
 		return;
 
-	string patchPackageName = name;
-
-	const char *slash = strchr(name, '/');
-	if (!slash)
+	if (patch.name.find('/') == string::npos)
 		return;
 
-	patchPackageName.resize(slash - name);
-	name = slash + 1;
+	string patchPackageName(patch.name, 0, patch.name.find('/'));
+	string fileName(patch.name, patch.name.find('/') + 1);
 
-	if (!UTF8ToWideBuf(widePatchableFilename, name))
+	if (!UTF8ToWideBuf(widePatchableFilename, fileName.c_str()))
 		return;
-	if (!UTF8ToWideBuf(widePatchHash, hash))
-		return;
-	if (!UTF8ToWideBuf(sourceURL, source))
-		return;
-	if (!UTF8ToWideBuf(patchHashStr, hash))
+	if (!UTF8ToWideBuf(sourceURL, patch.source.c_str()))
 		return;
 
 	for (update_t &update : updates) {
 		if (update.packageName != patchPackageName)
 			continue;
-		if (update.basename != widePatchableFilename)
+		if (update.outputPath != widePatchableFilename)
 			continue;
 
-		StringToHash(patchHashStr, update.downloadhash);
-
-		/* Replace the source URL with the patch file, mark it as
-		 * patchable, and re-calculate download size */
-		totalFileSize -= (update.fileSize - size);
-		update.sourceURL = sourceURL;
-		update.fileSize = size;
 		update.patchable = true;
 
-		/* Since the patch depends on the previous version, we can
-		 * no longer rely on the temp name being unique to the
-		 * new file's hash */
-		update.tempPath = tempPath;
-		update.tempPath += L"\\";
-		update.tempPath += patchHashStr;
+		/* Replace the source URL with the patch file, update
+	         * the download hash, and re-calculate download size */
+		StringToHash(patch.hash, update.downloadHash);
+		update.sourceURL = sourceURL;
+		totalFileSize -= (update.fileSize - patch.size);
+		update.fileSize = patch.size;
+
 		break;
 	}
 }
 
-static bool MoveInUseFileAway(update_t &file)
+static bool MoveInUseFileAway(const update_t &file)
 {
 	_TCHAR deleteMeName[MAX_PATH];
 	_TCHAR randomStr[MAX_PATH];
 
 	BYTE junk[40];
-	BYTE hash[BLAKE2_HASH_LENGTH];
+	B2Hash hash;
+	string temp;
 
 	CryptGenRandom(hProvider, sizeof(junk), junk);
-	blake2b(hash, sizeof(hash), junk, sizeof(junk), NULL, 0);
-	HashToString(hash, randomStr);
+	blake2b(hash.data(), hash.size(), junk, sizeof(junk), nullptr, 0);
+	HashToString(hash, temp);
+
+	if (!UTF8ToWideBuf(randomStr, temp.c_str()))
+		return false;
+
 	randomStr[8] = 0;
 
 	StringCbCopy(deleteMeName, sizeof(deleteMeName),
@@ -1001,23 +928,20 @@ static bool UpdateFile(ZSTD_DCtx *ctx, update_t &file)
 {
 	wchar_t oldFileRenamedPath[MAX_PATH];
 
-	if (file.patchable)
-		Status(L"Updating %s...", file.outputPath.c_str());
-	else
-		Status(L"Installing %s...", file.outputPath.c_str());
+	/* Grab the patch/file data from the global cache. */
+	vector<std::byte> &patch_data = download_data[file.downloadHash];
 
 	/* Check if we're replacing an existing file or just installing a new
 	 * one */
 	DWORD attribs = GetFileAttributes(file.outputPath.c_str());
 
 	if (attribs != INVALID_FILE_ATTRIBUTES) {
-		wchar_t *curFileName = nullptr;
 		wchar_t baseName[MAX_PATH];
 
 		StringCbCopy(baseName, sizeof(baseName),
 			     file.outputPath.c_str());
 
-		curFileName = wcsrchr(baseName, '/');
+		wchar_t *curFileName = wcsrchr(baseName, '/');
 		if (curFileName) {
 			curFileName[0] = '\0';
 			curFileName++;
@@ -1031,8 +955,10 @@ static bool UpdateFile(ZSTD_DCtx *ctx, update_t &file)
 			    L".old");
 
 		if (!MyCopyFile(file.outputPath.c_str(), oldFileRenamedPath)) {
+			DWORD err = GetLastError();
 			int is_sharing_violation =
-				(GetLastError() == ERROR_SHARING_VIOLATION);
+				(err == ERROR_SHARING_VIOLATION ||
+				 err == ERROR_USER_MAPPED_FILE);
 
 			if (is_sharing_violation)
 				Status(L"Update failed: %s is still in use.  "
@@ -1054,12 +980,14 @@ static bool UpdateFile(ZSTD_DCtx *ctx, update_t &file)
 	retryAfterMovingFile:
 
 		if (file.patchable) {
-			error_code = ApplyPatch(ctx, file.tempPath.c_str(),
+			error_code = ApplyPatch(ctx, patch_data.data(),
+						file.fileSize,
 						file.outputPath.c_str());
+
 			installed_ok = (error_code == 0);
 
 			if (installed_ok) {
-				BYTE patchedFileHash[BLAKE2_HASH_LENGTH];
+				B2Hash patchedFileHash;
 				if (!CalculateFileHash(file.outputPath.c_str(),
 						       patchedFileHash)) {
 					Status(L"Update failed: Couldn't "
@@ -1070,8 +998,7 @@ static bool UpdateFile(ZSTD_DCtx *ctx, update_t &file)
 					return false;
 				}
 
-				if (memcmp(file.hash, patchedFileHash,
-					   BLAKE2_HASH_LENGTH) != 0) {
+				if (file.hash != patchedFileHash) {
 					Status(L"Update failed: Integrity "
 					       L"check of patched "
 					       L"%s failed",
@@ -1082,14 +1009,16 @@ static bool UpdateFile(ZSTD_DCtx *ctx, update_t &file)
 				}
 			}
 		} else {
-			installed_ok = MyCopyFile(file.tempPath.c_str(),
-						  file.outputPath.c_str());
+			installed_ok = QuickWriteFile(file.outputPath.c_str(),
+						      patch_data.data(),
+						      patch_data.size());
 			error_code = GetLastError();
 		}
 
 		if (!installed_ok) {
 			int is_sharing_violation =
-				(error_code == ERROR_SHARING_VIOLATION);
+				(error_code == ERROR_SHARING_VIOLATION ||
+				 error_code == ERROR_USER_MAPPED_FILE);
 
 			if (is_sharing_violation) {
 				if (!already_tried_to_move) {
@@ -1126,12 +1055,14 @@ static bool UpdateFile(ZSTD_DCtx *ctx, update_t &file)
 
 		/* We may be installing into new folders,
 		 * make sure they exist */
-		CreateFoldersForPath(file.outputPath.c_str());
+		filesystem::path filePath(file.outputPath.c_str());
+		create_directories(filePath.parent_path());
 
 		file.previousFile = L"";
 
-		bool success = !!MyCopyFile(file.tempPath.c_str(),
-					    file.outputPath.c_str());
+		bool success = !!QuickWriteFile(file.outputPath.c_str(),
+						patch_data.data(),
+						patch_data.size());
 		if (!success) {
 			Status(L"Update failed: Couldn't install %s (error %d)",
 			       file.outputPath.c_str(), GetLastError());
@@ -1187,9 +1118,8 @@ static bool UpdateWorker()
 
 static bool RunUpdateWorkers(int num)
 try {
-	for (update_t &update : updates) {
-		updateQueue.push(update);
-	}
+	for (update_t &update : updates)
+		updateQueue.emplace(update);
 
 	vector<future<bool>> thread_success_results;
 	thread_success_results.resize(num);
@@ -1209,11 +1139,7 @@ try {
 	return false;
 }
 
-#define PATCH_MANIFEST_URL \
-	L"https://obsproject.com/update_studio/getpatchmanifest"
-#define HASH_NULL L"0000000000000000000000000000000000000000"
-
-static bool UpdateVS2019Redists(const Json &root)
+static bool UpdateVS2019Redists(const string &vc_redist_hash)
 {
 	/* ------------------------------------------ *
 	 * Initialize session                         */
@@ -1237,11 +1163,10 @@ static bool UpdateVS2019Redists(const Json &root)
 	WinHttpSetOption(hSession, WINHTTP_OPTION_DECOMPRESSION,
 			 (LPVOID)&compressionFlags, sizeof(compressionFlags));
 
-	HttpHandle hConnect = WinHttpConnect(hSession,
-					     L"cdn-fastly.obsproject.com",
+	HttpHandle hConnect = WinHttpConnect(hSession, kCDNHostname,
 					     INTERNET_DEFAULT_HTTPS_PORT, 0);
 	if (!hConnect) {
-		Status(L"Update failed: Couldn't connect to cdn-fastly.obsproject.com");
+		Status(L"Update failed: Couldn't connect to %S", kCDNHostname);
 		return false;
 	}
 
@@ -1277,30 +1202,13 @@ static bool UpdateVS2019Redists(const Json &root)
 	/* ------------------------------------------ *
 	 * Get expected hash                          */
 
-	const Json &redistJson = root["vc2019_redist_x64"];
-	if (!redistJson.is_string()) {
-		Status(L"Update failed: Could not parse VC2019 redist json");
-		return false;
-	}
-
-	const string &expectedHashUTF8 = redistJson.string_value();
-	wchar_t expectedHashWide[BLAKE2_HASH_STR_LENGTH];
-	BYTE expectedHash[BLAKE2_HASH_LENGTH];
-
-	if (!UTF8ToWideBuf(expectedHashWide, expectedHashUTF8.c_str())) {
-		DeleteFile(destPath.c_str());
-		Status(L"Update failed: Couldn't convert Json for redist hash");
-		return false;
-	}
-
-	StringToHash(expectedHashWide, expectedHash);
-
-	wchar_t downloadHashWide[BLAKE2_HASH_STR_LENGTH];
-	BYTE downloadHash[BLAKE2_HASH_LENGTH];
+	B2Hash expectedHash;
+	StringToHash(vc_redist_hash, expectedHash);
 
 	/* ------------------------------------------ *
 	 * Get download hash                          */
 
+	B2Hash downloadHash;
 	if (!CalculateFileHash(destPath.c_str(), downloadHash)) {
 		DeleteFile(destPath.c_str());
 		Status(L"Update failed: Couldn't verify integrity of %s",
@@ -1311,8 +1219,7 @@ static bool UpdateVS2019Redists(const Json &root)
 	/* ------------------------------------------ *
 	 * If hashes do not match, integrity failed   */
 
-	HashToString(downloadHash, downloadHashWide);
-	if (wcscmp(expectedHashWide, downloadHashWide) != 0) {
+	if (downloadHash == expectedHash) {
 		DeleteFile(destPath.c_str());
 		Status(L"Update failed: Couldn't verify integrity of %s",
 		       L"Visual C++ 2019 Redistributable");
@@ -1353,6 +1260,52 @@ static bool UpdateVS2019Redists(const Json &root)
 	}
 
 	return success;
+}
+
+static void UpdateRegistryVersion(const Manifest &manifest)
+{
+	const char *regKey =
+		R"(Software\Microsoft\Windows\CurrentVersion\Uninstall\OBS Studio)";
+	LSTATUS res;
+	HKEY key;
+	char version[32];
+	int formattedLen;
+
+	/* The manifest does not store a version string, so we gotta make one ourselves. */
+	if (manifest.beta || manifest.rc) {
+		formattedLen = sprintf_s(
+			version, sizeof(version), "%d.%d.%d-%s%d",
+			manifest.version_major, manifest.version_minor,
+			manifest.version_patch, manifest.beta ? "beta" : "rc",
+			manifest.beta ? manifest.beta : manifest.rc);
+	} else {
+		formattedLen = sprintf_s(version, sizeof(version), "%d.%d.%d",
+					 manifest.version_major,
+					 manifest.version_minor,
+					 manifest.version_patch);
+	}
+
+	if (formattedLen <= 0)
+		return;
+
+	res = RegOpenKeyExA(HKEY_LOCAL_MACHINE, regKey, 0,
+			    KEY_WRITE | KEY_WOW64_32KEY, &key);
+	if (res != ERROR_SUCCESS)
+		return;
+
+	RegSetValueExA(key, "DisplayVersion", 0, REG_SZ, (const BYTE *)version,
+		       formattedLen + 1);
+	RegCloseKey(key);
+}
+
+static void ClearShaderCache()
+{
+	wchar_t shader_path[MAX_PATH];
+	SHGetFolderPathW(NULL, CSIDL_COMMON_APPDATA, NULL, SHGFP_TYPE_CURRENT,
+			 shader_path);
+	StringCbCatW(shader_path, sizeof(shader_path),
+		     L"\\obs-studio\\shader-cache");
+	filesystem::remove_all(shader_path);
 }
 
 extern "C" void UpdateHookFiles(void);
@@ -1511,7 +1464,7 @@ static bool Update(wchar_t *cmdLine)
 	/* ------------------------------------- *
 	 * Load manifest file                    */
 
-	Json root;
+	Manifest manifest;
 	{
 		string manifestFile = QuickReadFile(manifestPath);
 		if (manifestFile.empty()) {
@@ -1519,40 +1472,33 @@ static bool Update(wchar_t *cmdLine)
 			return false;
 		}
 
-		string error;
-		root = Json::parse(manifestFile, error);
-
-		if (!error.empty()) {
+		try {
+			json manifestContents = json::parse(manifestFile);
+			manifest = manifestContents.get<Manifest>();
+		} catch (json::exception &e) {
 			Status(L"Update failed: Couldn't parse update "
 			       L"manifest: %S",
-			       error.c_str());
+			       e.what());
 			return false;
 		}
-	}
-
-	if (!root.is_object()) {
-		Status(L"Update failed: Invalid update manifest");
-		return false;
 	}
 
 	/* ------------------------------------- *
 	 * Hash local files listed in manifest   */
 
-	RunHasherWorkers(4, root["packages"]);
+	RunHasherWorkers(4, manifest.packages);
 
 	/* ------------------------------------- *
 	 * Parse current manifest update files   */
 
-	const Json::array &packages = root["packages"].array_items();
-	for (size_t i = 0; i < packages.size(); i++) {
-		if (!AddPackageUpdateFiles(packages, i, tempPath,
-					   branch.c_str())) {
+	for (const Package &package : manifest.packages) {
+		if (!AddPackageUpdateFiles(package, branch.c_str())) {
 			Status(L"Update failed: Failed to process update packages");
 			return false;
 		}
 
 		/* Add removed files to deletion queue (if any) */
-		AddPackageRemovedFiles(packages[i]);
+		AddPackageRemovedFiles(package);
 	}
 
 	SendDlgItemMessage(hwndMain, IDC_PROGRESS, PBM_SETMARQUEE, 0, 0);
@@ -1561,7 +1507,7 @@ static bool Update(wchar_t *cmdLine)
 	/* ------------------------------------- *
 	 * Exit if updates already installed     */
 
-	if (!updates.size()) {
+	if (updates.empty()) {
 		Status(L"All available updates are already installed.");
 		SetDlgItemText(hwndMain, IDC_BUTTON, L"Launch OBS");
 		return true;
@@ -1571,7 +1517,7 @@ static bool Update(wchar_t *cmdLine)
 	 * Check for VS2019 redistributables     */
 
 	if (!HasVS2019Redist()) {
-		if (!UpdateVS2019Redists(root)) {
+		if (!UpdateVS2019Redists(manifest.vc2019_redist_x64)) {
 			return false;
 		}
 	}
@@ -1579,47 +1525,33 @@ static bool Update(wchar_t *cmdLine)
 	/* ------------------------------------- *
 	 * Generate file hash json               */
 
-	Json::array files;
-
+	PatchesRequest files;
 	for (update_t &update : updates) {
-		wchar_t whash_string[BLAKE2_HASH_STR_LENGTH];
-		char hash_string[BLAKE2_HASH_STR_LENGTH];
-		char outputPath[MAX_PATH];
-
 		if (!update.has_hash)
 			continue;
 
-		/* check hash */
-		HashToString(update.my_hash, whash_string);
-		if (wcscmp(whash_string, HASH_NULL) == 0)
+		char outputPath[MAX_PATH];
+		if (!WideToUTF8Buf(outputPath, update.outputPath.c_str()))
 			continue;
 
-		if (!WideToUTF8Buf(hash_string, whash_string))
-			continue;
-		if (!WideToUTF8Buf(outputPath, update.basename.c_str()))
-			continue;
+		string hash_string;
+		HashToString(update.my_hash, hash_string);
 
 		string package_path;
 		package_path = update.packageName;
 		package_path += "/";
 		package_path += outputPath;
 
-		files.emplace_back(Json::object{
-			{"name", package_path},
-			{"hash", hash_string},
-		});
+		files.push_back({package_path, hash_string});
 	}
 
 	/* ------------------------------------- *
 	 * Send file hashes                      */
 
 	string newManifest;
-
-	if (files.size() > 0) {
-		string post_body;
-		Json(files).dump(post_body);
-
-		int responseCode;
+	if (!files.empty()) {
+		json request = files;
+		string post_body = request.dump();
 
 		int len = (int)post_body.size();
 		size_t compressSize = ZSTD_compressBound(len);
@@ -1628,21 +1560,22 @@ static bool Update(wchar_t *cmdLine)
 		compressedJson.resize(compressSize);
 
 		size_t result =
-			ZSTD_compress(&compressedJson[0], compressedJson.size(),
-				      post_body.data(), post_body.size(),
-				      ZSTD_CLEVEL_DEFAULT);
+			ZSTD_compress(compressedJson.data(),
+				      compressedJson.size(), post_body.data(),
+				      post_body.size(), ZSTD_CLEVEL_DEFAULT);
 
 		if (ZSTD_isError(result))
 			return false;
 
 		compressedJson.resize(result);
 
-		wstring manifestUrl(PATCH_MANIFEST_URL);
+		wstring manifestUrl(kPatchManifestURL);
 		if (branch != L"stable")
 			manifestUrl += L"?branch=" + branch;
 
+		int responseCode;
 		bool success = !!HTTPPostData(manifestUrl.c_str(),
-					      (BYTE *)&compressedJson[0],
+					      (BYTE *)compressedJson.data(),
 					      (int)compressedJson.size(),
 					      L"Accept-Encoding: gzip",
 					      &responseCode, newManifest);
@@ -1663,70 +1596,39 @@ static bool Update(wchar_t *cmdLine)
 	/* ------------------------------------- *
 	 * Parse new manifest                    */
 
-	string error;
-	root = Json::parse(newManifest, error);
-	if (!error.empty()) {
+	PatchesResponse patches;
+	try {
+		json patchManifest = json::parse(newManifest);
+		patches = patchManifest.get<PatchesResponse>();
+	} catch (json::exception &e) {
 		Status(L"Update failed: Couldn't parse patch manifest: %S",
-		       error.c_str());
+		       e.what());
 		return false;
 	}
 
-	if (!root.is_array()) {
-		Status(L"Update failed: Invalid patch manifest");
-		return false;
-	}
-
-	size_t packageCount = root.array_items().size();
-
-	for (size_t i = 0; i < packageCount; i++) {
-		const Json &patch = root[i];
-
-		if (!patch.is_object()) {
-			Status(L"Update failed: Invalid patch manifest");
-			return false;
-		}
-
-		const Json &name_json = patch["name"];
-		const Json &hash_json = patch["hash"];
-		const Json &source_json = patch["source"];
-		const Json &size_json = patch["size"];
-
-		if (!name_json.is_string())
-			continue;
-		if (!hash_json.is_string())
-			continue;
-		if (!source_json.is_string())
-			continue;
-		if (!size_json.is_number())
-			continue;
-
-		const string &name = name_json.string_value();
-		const string &hash = hash_json.string_value();
-		const string &source = source_json.string_value();
-		int size = size_json.int_value();
-
-		UpdateWithPatchIfAvailable(name.c_str(), hash.c_str(),
-					   source.c_str(), size);
+	/* Update updates with patch information. */
+	for (const PatchResponse &patch : patches) {
+		UpdateWithPatchIfAvailable(patch);
 	}
 
 	/* ------------------------------------- *
 	 * Deduplicate Downloads                 */
 
-	unordered_set<wstring> tempFiles;
+	unordered_set<B2Hash> downloadHashes;
 	for (update_t &update : updates) {
-		if (tempFiles.count(update.tempPath)) {
+		if (downloadHashes.count(update.downloadHash)) {
 			update.state = STATE_ALREADY_DOWNLOADED;
 			totalFileSize -= update.fileSize;
 			completedUpdates++;
-			continue;
+		} else {
+			downloadHashes.insert(update.downloadHash);
 		}
-
-		tempFiles.insert(update.tempPath);
 	}
 
 	/* ------------------------------------- *
 	 * Download Updates                      */
 
+	Status(L"Downloading updates...");
 	if (!RunDownloadWorkers(4))
 		return false;
 
@@ -1738,11 +1640,9 @@ static bool Update(wchar_t *cmdLine)
 	/* ------------------------------------- *
 	 * Install updates                       */
 
-	int updatesInstalled = 0;
-	int lastPosition = 0;
-
 	SendDlgItemMessage(hwndMain, IDC_PROGRESS, PBM_SETPOS, 0, 0);
 
+	Status(L"Installing updates...");
 	if (!RunUpdateWorkers(4))
 		return false;
 
@@ -1811,6 +1711,20 @@ static bool Update(wchar_t *cmdLine)
 	UpdateHookFiles();
 
 	/* ------------------------------------- *
+	 * Clear shader cache                    */
+
+	Status(L"Clearing shader cache...");
+	ClearShaderCache();
+
+	/* ------------------------------------- *
+	 * Update installed version in registry  */
+
+	if (!bIsPortable) {
+		Status(L"Updating version information...");
+		UpdateRegistryVersion(manifest);
+	}
+
+	/* ------------------------------------- *
 	 * Finish                                */
 
 	Status(L"Cleaning up...");
@@ -1819,10 +1733,6 @@ static bool Update(wchar_t *cmdLine)
 	for (update_t &update : updates) {
 		if (!update.previousFile.empty())
 			DeleteFile(update.previousFile.c_str());
-
-		/* We delete here not above in case of duplicate hashes */
-		if (!update.tempPath.empty())
-			DeleteFile(update.tempPath.c_str());
 	}
 
 	/* Delete all removed files mentioned in the manifest */
@@ -1882,7 +1792,7 @@ static void CancelUpdate(bool quit)
 	}
 }
 
-static void LaunchOBS(bool portable)
+static void LaunchOBS(LPWSTR lpCmdLine)
 {
 	wchar_t newCwd[MAX_PATH];
 	wchar_t obsPath[MAX_PATH];
@@ -1908,8 +1818,8 @@ static void LaunchOBS(bool portable)
 	execInfo.lpDirectory = newCwd;
 	execInfo.nShow = SW_SHOWNORMAL;
 
-	if (portable)
-		execInfo.lpParameters = L"--portable";
+	if (lpCmdLine[0])
+		execInfo.lpParameters = lpCmdLine;
 
 	ShellExecuteEx(&execInfo);
 }
@@ -1974,14 +1884,14 @@ static int RestartAsAdmin(LPCWSTR lpCmdLine, LPCWSTR cwd)
 	SHELLEXECUTEINFO shExInfo = {0};
 	shExInfo.cbSize = sizeof(shExInfo);
 	shExInfo.fMask = SEE_MASK_NOCLOSEPROCESS;
-	shExInfo.hwnd = 0;
+	shExInfo.hwnd = nullptr;
 	shExInfo.lpVerb = L"runas"; /* Operation to perform */
 	shExInfo.lpFile = myPath;   /* Application to start */
 	shExInfo.lpParameters =
 		elevatedCmdLine.c_str(); /* Additional parameters */
 	shExInfo.lpDirectory = cwd;
 	shExInfo.nShow = SW_NORMAL;
-	shExInfo.hInstApp = 0;
+	shExInfo.hInstApp = nullptr;
 
 	/* annoyingly the actual elevated updater will disappear behind other
 	 * windows :( */
@@ -2027,9 +1937,6 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR lpCmdLine, int)
 	wchar_t cwd[MAX_PATH];
 	GetCurrentDirectoryW(_countof(cwd) - 1, cwd);
 
-	bool isPortable = wcsstr(lpCmdLine, L"Portable") != nullptr ||
-			  wcsstr(lpCmdLine, L"--portable") != nullptr;
-
 	if (!IsWindows10OrGreater()) {
 		MessageBox(
 			nullptr,
@@ -2064,7 +1971,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR lpCmdLine, int)
 					obs_base_directory, nullptr);
 			SetCurrentDirectory(obs_base_directory);
 
-			LaunchOBS(isPortable);
+			LaunchOBS(lpCmdLine);
 		}
 
 		if (hLowMutex) {
@@ -2113,7 +2020,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR lpCmdLine, int)
 		WinHandle hMutex = OpenMutex(
 			SYNCHRONIZE, false, L"OBSUpdaterRunningAsNonAdminUser");
 		if (msg.wParam == 1 && !hMutex) {
-			LaunchOBS(isPortable);
+			LaunchOBS(lpCmdLine);
 		}
 
 		return (int)msg.wParam;

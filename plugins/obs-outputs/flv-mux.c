@@ -1,5 +1,5 @@
 /******************************************************************************
-    Copyright (C) 2014 by Hugh Bailey <obs.jim@gmail.com>
+    Copyright (C) 2023 by Lain Bailey <lain@obsproject.com>
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -29,7 +29,6 @@
 //#define DEBUG_TIMESTAMPS
 //#define WRITE_FLV_HEADER
 
-#define VIDEODATA_AVCVIDEOPACKET 7.0
 #define AUDIODATA_AAC 10.0
 
 #define VIDEO_FRAMETYPE_OFFSET 4
@@ -101,6 +100,29 @@ static inline double encoder_bitrate(obs_encoder_t *encoder)
 	return bitrate;
 }
 
+static const double VIDEODATA_AVCVIDEOPACKET = 7.0;
+// Additional FLV onMetaData values for Enhanced RTMP/FLV
+static const double VIDEODATA_AV1VIDEOPACKET = 1635135537.0; // FourCC "av01"
+#ifdef ENABLE_HEVC
+static const double VIDEODATA_HEVCVIDEOPACKET = 1752589105.0; // FourCC "hvc1"
+#endif
+
+static inline double encoder_video_codec(obs_encoder_t *encoder)
+{
+	const char *codec = obs_encoder_get_codec(encoder);
+
+	if (strcmp(codec, "h264") == 0)
+		return VIDEODATA_AVCVIDEOPACKET;
+	if (strcmp(codec, "av1") == 0)
+		return VIDEODATA_AV1VIDEOPACKET;
+#ifdef ENABLE_HEVC
+	if (strcmp(codec, "hevc") == 0)
+		return VIDEODATA_HEVCVIDEOPACKET;
+#endif
+
+	return 0.0;
+}
+
 #define FLV_INFO_SIZE_OFFSET 42
 
 void write_file_info(FILE *file, int64_t duration_ms, int64_t size)
@@ -143,7 +165,7 @@ static void build_flv_meta_data(obs_output_t *context, uint8_t **output,
 	enc_num_val(&enc, end, "height",
 		    (double)obs_encoder_get_height(vencoder));
 
-	enc_num_val(&enc, end, "videocodecid", VIDEODATA_AVCVIDEOPACKET);
+	enc_num_val(&enc, end, "videocodecid", encoder_video_codec(vencoder));
 	enc_num_val(&enc, end, "videodatarate", encoder_bitrate(vencoder));
 	enc_num_val(&enc, end, "framerate", video_output_get_frame_rate(video));
 
@@ -167,7 +189,7 @@ static void build_flv_meta_data(obs_output_t *context, uint8_t **output,
 	dstr_printf(&encoder_name, "%s (libobs version ", MODULE_NAME);
 
 #ifdef HAVE_OBSCONFIG_H
-	dstr_cat(&encoder_name, OBS_VERSION);
+	dstr_cat(&encoder_name, obs_get_version_string());
 #else
 	dstr_catf(&encoder_name, "%d.%d.%d", LIBOBS_API_MAJOR_VER,
 		  LIBOBS_API_MINOR_VER, LIBOBS_API_PATCH_VER);

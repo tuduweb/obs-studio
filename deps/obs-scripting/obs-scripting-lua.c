@@ -1,5 +1,5 @@
 /******************************************************************************
-    Copyright (C) 2017 by Hugh Bailey <jim@obsproject.com>
+    Copyright (C) 2023 by Lain Bailey <lain@obsproject.com>
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -52,6 +52,7 @@ static const char *get_script_path_func = "\
 function script_path()\n\
 	 return \"%s\"\n\
 end\n\
+package.cpath = package.cpath .. \";\" .. script_path() .. \"/?." SO_EXT "\"\n\
 package.path = package.path .. \";\" .. script_path() .. \"/?.lua\"\n";
 
 static char *startup_script = NULL;
@@ -85,6 +86,7 @@ static bool load_lua_script(struct obs_lua_script *data)
 	struct dstr str = {0};
 	bool success = false;
 	int ret;
+	char *file_data;
 
 	lua_State *script = luaL_newstate();
 	if (!script) {
@@ -121,11 +123,21 @@ static bool load_lua_script(struct obs_lua_script *data)
 	add_lua_frontend_funcs(script);
 #endif
 
-	if (luaL_loadfile(script, data->base.path.array) != 0) {
-		script_warn(&data->base, "Error loading file: %s",
+	file_data = os_quick_read_utf8_file(data->base.path.array);
+	if (!file_data) {
+		script_warn(&data->base, "Error opening file: %s",
 			    lua_tostring(script, -1));
 		goto fail;
 	}
+
+	if (luaL_loadbuffer(script, file_data, strlen(file_data),
+			    data->base.path.array) != 0) {
+		script_warn(&data->base, "Error loading file: %s",
+			    lua_tostring(script, -1));
+		bfree(file_data);
+		goto fail;
+	}
+	bfree(file_data);
 
 	if (lua_pcall(script, 0, LUA_MULTRET, 0) != 0) {
 		script_warn(&data->base, "Error running file: %s",
@@ -1217,9 +1229,12 @@ void obs_lua_script_unload(obs_script_t *s)
 	/* call script_unload           */
 
 	pthread_mutex_lock(&data->mutex);
+	current_lua_script = data;
 
 	lua_getglobal(script, "script_unload");
 	lua_pcall(script, 0, 0, 0);
+
+	current_lua_script = NULL;
 
 	/* ---------------------------- */
 	/* remove all callbacks         */

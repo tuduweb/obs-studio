@@ -16,7 +16,7 @@
 
 #include "ui-config.h"
 
-#if YOUTUBE_ENABLED
+#ifdef YOUTUBE_ENABLED
 #include "youtube-api-wrappers.hpp"
 #endif
 
@@ -29,6 +29,7 @@ extern QCefCookieManager *panel_cookies;
 enum class ListOpt : int {
 	ShowAll = 1,
 	Custom,
+	WHIP,
 };
 
 enum class Section : int {
@@ -39,6 +40,11 @@ enum class Section : int {
 inline bool OBSBasicSettings::IsCustomService() const
 {
 	return ui->service->currentData().toInt() == (int)ListOpt::Custom;
+}
+
+inline bool OBSBasicSettings::IsWHIP() const
+{
+	return ui->service->currentData().toInt() == (int)ListOpt::WHIP;
 }
 
 void OBSBasicSettings::InitStreamPage()
@@ -78,10 +84,10 @@ void OBSBasicSettings::InitStreamPage()
 	ui->twitchAddonDropdown->addItem(
 		QTStr("Basic.Settings.Stream.TTVAddon.Both"));
 
-	connect(ui->ignoreRecommended, SIGNAL(clicked(bool)), this,
-		SLOT(DisplayEnforceWarning(bool)));
-	connect(ui->ignoreRecommended, SIGNAL(toggled(bool)), this,
-		SLOT(UpdateResFPSLimits()));
+	connect(ui->ignoreRecommended, &QCheckBox::clicked, this,
+		&OBSBasicSettings::DisplayEnforceWarning);
+	connect(ui->ignoreRecommended, &QCheckBox::toggled, this,
+		&OBSBasicSettings::UpdateResFPSLimits);
 }
 
 void OBSBasicSettings::LoadStream1Settings()
@@ -91,6 +97,9 @@ void OBSBasicSettings::LoadStream1Settings()
 
 	obs_service_t *service_obj = main->GetService();
 	const char *type = obs_service_get_type(service_obj);
+	bool is_rtmp_custom = (strcmp(type, "rtmp_custom") == 0);
+	bool is_rtmp_common = (strcmp(type, "rtmp_common") == 0);
+	bool is_whip = (strcmp(type, "whip_custom") == 0);
 
 	loading = true;
 
@@ -100,10 +109,14 @@ void OBSBasicSettings::LoadStream1Settings()
 	const char *server = obs_data_get_string(settings, "server");
 	const char *key = obs_data_get_string(settings, "key");
 	protocol = QT_UTF8(obs_service_get_protocol(service_obj));
+	const char *bearer_token =
+		obs_data_get_string(settings, "bearer_token");
 
-	if (strcmp(type, "rtmp_custom") == 0) {
-		ui->service->setCurrentIndex(0);
+	if (is_rtmp_custom || is_whip)
 		ui->customServer->setText(server);
+
+	if (is_rtmp_custom) {
+		ui->service->setCurrentIndex(0);
 		lastServiceIdx = 0;
 		lastCustomServer = ui->customServer->text();
 
@@ -115,29 +128,6 @@ void OBSBasicSettings::LoadStream1Settings()
 		ui->authUsername->setText(QT_UTF8(username));
 		ui->authPw->setText(QT_UTF8(password));
 		ui->useAuth->setChecked(use_auth);
-
-		/* add tooltips for stream key, user, password fields */
-		QString file = !App()->IsThemeDark()
-				       ? ":/res/images/help.svg"
-				       : ":/res/images/help_light.svg";
-		QString lStr = "<html>%1 <img src='%2' style=' \
-				vertical-align: bottom;  \
-				' /></html>";
-
-		ui->streamKeyLabel->setText(
-			lStr.arg(ui->streamKeyLabel->text(), file));
-		ui->streamKeyLabel->setToolTip(
-			QTStr("Basic.AutoConfig.StreamPage.StreamKey.ToolTip"));
-
-		ui->authUsernameLabel->setText(
-			lStr.arg(ui->authUsernameLabel->text(), file));
-		ui->authUsernameLabel->setToolTip(
-			QTStr("Basic.Settings.Stream.Custom.Username.ToolTip"));
-
-		ui->authPwLabel->setText(
-			lStr.arg(ui->authPwLabel->text(), file));
-		ui->authPwLabel->setToolTip(
-			QTStr("Basic.Settings.Stream.Custom.Password.ToolTip"));
 	} else {
 		int idx = ui->service->findText(service);
 		if (idx == -1) {
@@ -157,7 +147,7 @@ void OBSBasicSettings::LoadStream1Settings()
 
 	UpdateServerList();
 
-	if (strcmp(type, "rtmp_common") == 0) {
+	if (is_rtmp_common) {
 		int idx = ui->server->findData(server);
 		if (idx == -1) {
 			if (server && *server)
@@ -167,10 +157,12 @@ void OBSBasicSettings::LoadStream1Settings()
 		ui->server->setCurrentIndex(idx);
 	}
 
-	ui->key->setText(key);
+	if (is_whip)
+		ui->key->setText(bearer_token);
+	else
+		ui->key->setText(key);
 
-	lastService.clear();
-	ServiceChanged();
+	ServiceChanged(true);
 
 	UpdateKeyLink();
 	UpdateMoreInfoLink();
@@ -191,14 +183,21 @@ void OBSBasicSettings::LoadStream1Settings()
 void OBSBasicSettings::SaveStream1Settings()
 {
 	bool customServer = IsCustomService();
-	const char *service_id = customServer ? "rtmp_custom" : "rtmp_common";
+	bool whip = IsWHIP();
+	const char *service_id = "rtmp_common";
+
+	if (customServer) {
+		service_id = "rtmp_custom";
+	} else if (whip) {
+		service_id = "whip_custom";
+	}
 
 	obs_service_t *oldService = main->GetService();
 	OBSDataAutoRelease hotkeyData = obs_hotkeys_save_service(oldService);
 
 	OBSDataAutoRelease settings = obs_data_create();
 
-	if (!customServer) {
+	if (!customServer && !whip) {
 		obs_data_set_string(settings, "service",
 				    QT_TO_UTF8(ui->service->currentText()));
 		obs_data_set_string(settings, "protocol", QT_TO_UTF8(protocol));
@@ -239,7 +238,14 @@ void OBSBasicSettings::SaveStream1Settings()
 		obs_data_set_bool(settings, "bwtest", false);
 	}
 
-	obs_data_set_string(settings, "key", QT_TO_UTF8(ui->key->text()));
+	if (whip) {
+		obs_data_set_string(settings, "service", "WHIP");
+		obs_data_set_string(settings, "bearer_token",
+				    QT_TO_UTF8(ui->key->text()));
+	} else {
+		obs_data_set_string(settings, "key",
+				    QT_TO_UTF8(ui->key->text()));
+	}
 
 	OBSServiceAutoRelease newService = obs_service_create(
 		service_id, "default_service", settings, hotkeyData);
@@ -249,6 +255,7 @@ void OBSBasicSettings::SaveStream1Settings()
 
 	main->SetService(newService);
 	main->SaveService();
+	LoadOutputSettings();
 	main->auth = auth;
 	if (!!main->auth) {
 		main->auth->LoadUI();
@@ -262,7 +269,7 @@ void OBSBasicSettings::SaveStream1Settings()
 
 void OBSBasicSettings::UpdateMoreInfoLink()
 {
-	if (IsCustomService()) {
+	if (IsCustomService() || IsWHIP()) {
 		ui->moreInfoButton->hide();
 		return;
 	}
@@ -312,9 +319,38 @@ void OBSBasicSettings::UpdateKeyLink()
 	if (serviceName == "Dacast") {
 		ui->streamKeyLabel->setText(
 			QTStr("Basic.AutoConfig.StreamPage.EncoderKey"));
+		ui->streamKeyLabel->setToolTip("");
+	} else if (IsWHIP()) {
+		ui->streamKeyLabel->setText(
+			QTStr("Basic.AutoConfig.StreamPage.BearerToken"));
+		ui->streamKeyLabel->setToolTip("");
 	} else if (!IsCustomService()) {
 		ui->streamKeyLabel->setText(
 			QTStr("Basic.AutoConfig.StreamPage.StreamKey"));
+		ui->streamKeyLabel->setToolTip("");
+	} else {
+		/* add tooltips for stream key, user, password fields */
+		QString file = !App()->IsThemeDark()
+				       ? ":/res/images/help.svg"
+				       : ":/res/images/help_light.svg";
+		QString lStr = "<html>%1 <img src='%2' style=' \
+				vertical-align: bottom;  \
+				' /></html>";
+
+		ui->streamKeyLabel->setText(lStr.arg(
+			QTStr("Basic.AutoConfig.StreamPage.StreamKey"), file));
+		ui->streamKeyLabel->setToolTip(
+			QTStr("Basic.AutoConfig.StreamPage.StreamKey.ToolTip"));
+
+		ui->authUsernameLabel->setText(lStr.arg(
+			QTStr("Basic.Settings.Stream.Custom.Username"), file));
+		ui->authUsernameLabel->setToolTip(
+			QTStr("Basic.Settings.Stream.Custom.Username.ToolTip"));
+
+		ui->authPwLabel->setText(lStr.arg(
+			QTStr("Basic.Settings.Stream.Custom.Password"), file));
+		ui->authPwLabel->setToolTip(
+			QTStr("Basic.Settings.Stream.Custom.Password.ToolTip"));
 	}
 
 	if (QString(streamKeyLink).isNull() ||
@@ -355,6 +391,11 @@ void OBSBasicSettings::LoadServices(bool showAll)
 
 	for (QString &name : names)
 		ui->service->addItem(name);
+
+	if (obs_is_output_protocol_registered("WHIP")) {
+		ui->service->addItem(QTStr("WHIP"),
+				     QVariant((int)ListOpt::WHIP));
+	}
 
 	if (!showAll) {
 		ui->service->addItem(
@@ -420,7 +461,7 @@ static void reset_service_ui_fields(Ui::OBSBasicSettings *ui,
 	ui->disconnectAccount->setVisible(false);
 }
 
-#if YOUTUBE_ENABLED
+#ifdef YOUTUBE_ENABLED
 static void get_yt_ch_title(Ui::OBSBasicSettings *ui)
 {
 	const char *name = config_get_string(OBSBasic::Get()->Config(),
@@ -440,6 +481,8 @@ static void get_yt_ch_title(Ui::OBSBasicSettings *ui)
 void OBSBasicSettings::UseStreamKeyAdvClicked()
 {
 	ui->streamKeyWidget->setVisible(true);
+	ui->streamKeyLabel->setVisible(true);
+	ui->useStreamKeyAdv->setVisible(false);
 }
 
 void OBSBasicSettings::on_service_currentIndexChanged(int idx)
@@ -480,17 +523,18 @@ void OBSBasicSettings::on_customServer_textChanged(const QString &)
 		lastCustomServer = ui->customServer->text();
 }
 
-void OBSBasicSettings::ServiceChanged()
+void OBSBasicSettings::ServiceChanged(bool resetFields)
 {
 	std::string service = QT_TO_UTF8(ui->service->currentText());
 	bool custom = IsCustomService();
+	bool whip = IsWHIP();
 
 	ui->disconnectAccount->setVisible(false);
 	ui->bandwidthTestEnable->setVisible(false);
 	ui->twitchAddonDropdown->setVisible(false);
 	ui->twitchAddonLabel->setVisible(false);
 
-	if (lastService != service.c_str()) {
+	if (resetFields || lastService != service.c_str()) {
 		reset_service_ui_fields(ui.get(), service, loading);
 	}
 
@@ -500,7 +544,7 @@ void OBSBasicSettings::ServiceChanged()
 	ui->authPwLabel->setVisible(custom);
 	ui->authPwWidget->setVisible(custom);
 
-	if (custom) {
+	if (custom || whip) {
 		ui->streamkeyPageLayout->insertRow(1, ui->serverLabel,
 						   ui->serverStackedWidget);
 
@@ -521,7 +565,7 @@ void OBSBasicSettings::ServiceChanged()
 	auto system_auth_service = main->auth->service();
 	bool service_check = service.find(system_auth_service) !=
 			     std::string::npos;
-#if YOUTUBE_ENABLED
+#ifdef YOUTUBE_ENABLED
 	service_check = service_check ? service_check
 				      : IsYouTubeService(system_auth_service) &&
 						IsYouTubeService(service);
@@ -566,7 +610,10 @@ QString OBSBasicSettings::FindProtocol()
 
 		obs_properties_destroy(props);
 
-		return QT_UTF8(obs_data_get_string(settings, "protocol"));
+		const char *protocol =
+			obs_data_get_string(settings, "protocol");
+		if (protocol && *protocol)
+			return QT_UTF8(protocol);
 	}
 
 	return QString("RTMP");
@@ -625,11 +672,18 @@ void OBSBasicSettings::on_authPwShow_clicked()
 OBSService OBSBasicSettings::SpawnTempService()
 {
 	bool custom = IsCustomService();
-	const char *service_id = custom ? "rtmp_custom" : "rtmp_common";
+	bool whip = IsWHIP();
+	const char *service_id = "rtmp_common";
+
+	if (custom) {
+		service_id = "rtmp_custom";
+	} else if (whip) {
+		service_id = "whip_custom";
+	}
 
 	OBSDataAutoRelease settings = obs_data_create();
 
-	if (!custom) {
+	if (!custom && !whip) {
 		obs_data_set_string(settings, "service",
 				    QT_TO_UTF8(ui->service->currentText()));
 		obs_data_set_string(
@@ -640,7 +694,13 @@ OBSService OBSBasicSettings::SpawnTempService()
 			settings, "server",
 			QT_TO_UTF8(ui->customServer->text().trimmed()));
 	}
-	obs_data_set_string(settings, "key", QT_TO_UTF8(ui->key->text()));
+
+	if (whip)
+		obs_data_set_string(settings, "bearer_token",
+				    QT_TO_UTF8(ui->key->text()));
+	else
+		obs_data_set_string(settings, "key",
+				    QT_TO_UTF8(ui->key->text()));
 
 	OBSServiceAutoRelease newService = obs_service_create(
 		service_id, "temp_service", settings, nullptr);
@@ -673,7 +733,7 @@ void OBSBasicSettings::OnOAuthStreamKeyConnected()
 		} else {
 			ui->bandwidthTestEnable->setChecked(false);
 		}
-#if YOUTUBE_ENABLED
+#ifdef YOUTUBE_ENABLED
 		if (IsYouTubeService(a->service())) {
 			ui->key->clear();
 
@@ -716,6 +776,14 @@ void OBSBasicSettings::on_connectAccount_clicked()
 	auth = OAuthStreamKey::Login(this, service);
 	if (!!auth) {
 		OnAuthConnected();
+#ifdef YOUTUBE_ENABLED
+		if (cef_js_avail && IsYouTubeService(service)) {
+			if (!main->GetYouTubeAppDock()) {
+				main->NewYouTubeAppDock();
+			}
+			main->GetYouTubeAppDock()->AccountConnected();
+		}
+#endif
 
 		ui->useStreamKeyAdv->setVisible(false);
 	}
@@ -758,6 +826,16 @@ void OBSBasicSettings::on_disconnectAccount_clicked()
 
 	ui->connectedAccountLabel->setVisible(false);
 	ui->connectedAccountText->setVisible(false);
+
+#ifdef YOUTUBE_ENABLED
+	if (cef_js_avail && IsYouTubeService(service)) {
+		if (!main->GetYouTubeAppDock()) {
+			main->NewYouTubeAppDock();
+		}
+		main->GetYouTubeAppDock()->AccountDisconnected();
+		main->GetYouTubeAppDock()->Update();
+	}
+#endif
 }
 
 void OBSBasicSettings::on_useStreamKey_clicked()
@@ -816,10 +894,10 @@ void OBSBasicSettings::UpdateVodTrackSetting()
 						     &pos, nullptr);
 	ui->simpleStreamingLayout->insertRow(pos + 1, nullptr, simpleVodTrack);
 
-	HookWidget(simpleVodTrack, SIGNAL(clicked(bool)),
-		   SLOT(OutputsChanged()));
-	connect(ui->simpleOutAdvanced, SIGNAL(toggled(bool)),
-		simpleVodTrack.data(), SLOT(setVisible(bool)));
+	HookWidget(simpleVodTrack.data(), &QCheckBox::clicked,
+		   &OBSBasicSettings::OutputsChanged);
+	connect(ui->simpleOutAdvanced, &QCheckBox::toggled,
+		simpleVodTrack.data(), &QCheckBox::setVisible);
 
 	/* -------------------------------------- */
 	/* advanced output mode vod track widgets */
@@ -835,12 +913,12 @@ void OBSBasicSettings::UpdateVodTrackSetting()
 		vodTrack[i] = new QRadioButton(QString::number(i + 1));
 		vodTrackLayout->addWidget(vodTrack[i]);
 
-		HookWidget(vodTrack[i], SIGNAL(clicked(bool)),
-			   SLOT(OutputsChanged()));
+		HookWidget(vodTrack[i].data(), &QRadioButton::clicked,
+			   &OBSBasicSettings::OutputsChanged);
 	}
 
-	HookWidget(vodTrackCheckbox, SIGNAL(clicked(bool)),
-		   SLOT(OutputsChanged()));
+	HookWidget(vodTrackCheckbox.data(), &QCheckBox::clicked,
+		   &OBSBasicSettings::OutputsChanged);
 
 	vodTrackLayout->addStretch();
 	vodTrackLayout->setContentsMargins(0, 0, 0, 0);
@@ -854,8 +932,8 @@ void OBSBasicSettings::UpdateVodTrackSetting()
 	vodTrackCheckbox->setChecked(vodTrackEnabled);
 	vodTrackContainer->setEnabled(vodTrackEnabled);
 
-	connect(vodTrackCheckbox, SIGNAL(clicked(bool)), vodTrackContainer,
-		SLOT(setEnabled(bool)));
+	connect(vodTrackCheckbox, &QCheckBox::clicked, vodTrackContainer,
+		&QWidget::setEnabled);
 
 	int trackIndex =
 		config_get_int(main->Config(), "AdvOut", "VodTrackIndex");
@@ -928,7 +1006,7 @@ void OBSBasicSettings::UpdateServiceRecommendations()
 	}
 #undef ENFORCE_TEXT
 
-#if YOUTUBE_ENABLED
+#ifdef YOUTUBE_ENABLED
 	if (IsYouTubeService(QT_TO_UTF8(ui->service->currentText()))) {
 		if (!text.isEmpty())
 			text += "<br><br>";
@@ -1164,8 +1242,8 @@ bool OBSBasicSettings::UpdateResFPSLimits()
 		ui->outputResolution->clear();
 		ui->outputResolution->setEditable(false);
 		HookWidget(ui->outputResolution,
-			   SIGNAL(currentIndexChanged(int)),
-			   SLOT(VideoChangedResolution()));
+			   &QComboBox::currentIndexChanged,
+			   &OBSBasicSettings::VideoChangedResolution);
 
 		int new_res_index = -1;
 
@@ -1369,7 +1447,7 @@ static QString get_adv_audio_fallback(const QString &enc)
 {
 	const char *codec = obs_get_encoder_codec(QT_TO_UTF8(enc));
 
-	if (strcmp(codec, "aac") == 0)
+	if (codec && strcmp(codec, "aac") == 0)
 		return "ffmpeg_opus";
 
 	QString aac_default = "ffmpeg_aac";
@@ -1546,9 +1624,7 @@ void OBSBasicSettings::ResetEncoders(bool streamOnly)
 
 	if (!streamOnly) {
 		ui->advOutRecEncoder->clear();
-		ui->advOutRecEncoder->addItem(TEXT_USE_STREAM_ENC, "none");
 		ui->advOutRecAEncoder->clear();
-		ui->advOutRecAEncoder->addItem(TEXT_USE_STREAM_ENC, "none");
 	}
 
 	/* ------------------------------------------------- */
@@ -1580,6 +1656,18 @@ void OBSBasicSettings::ResetEncoders(bool streamOnly)
 		}
 	}
 
+	ui->advOutEncoder->model()->sort(0);
+	ui->advOutAEncoder->model()->sort(0);
+
+	if (!streamOnly) {
+		ui->advOutRecEncoder->model()->sort(0);
+		ui->advOutRecEncoder->insertItem(0, TEXT_USE_STREAM_ENC,
+						 "none");
+		ui->advOutRecAEncoder->model()->sort(0);
+		ui->advOutRecAEncoder->insertItem(0, TEXT_USE_STREAM_ENC,
+						  "none");
+	}
+
 	/* ------------------------------------------------- */
 	/* load simple stream encoders                       */
 
@@ -1587,6 +1675,7 @@ void OBSBasicSettings::ResetEncoders(bool streamOnly)
 
 	ui->simpleOutStrEncoder->addItem(ENCODER_STR("Software"),
 					 QString(SIMPLE_ENCODER_X264));
+#ifdef _WIN32
 	if (service_supports_encoder(vcodecs, "obs_qsv11"))
 		ui->simpleOutStrEncoder->addItem(
 			ENCODER_STR("Hardware.QSV.H264"),
@@ -1595,6 +1684,7 @@ void OBSBasicSettings::ResetEncoders(bool streamOnly)
 		ui->simpleOutStrEncoder->addItem(
 			ENCODER_STR("Hardware.QSV.AV1"),
 			QString(SIMPLE_ENCODER_QSV_AV1));
+#endif
 	if (service_supports_encoder(vcodecs, "ffmpeg_nvenc"))
 		ui->simpleOutStrEncoder->addItem(
 			ENCODER_STR("Hardware.NVENC.H264"),

@@ -42,6 +42,7 @@ target_sources(
           obs-ffmpeg-av1.c
           obs-ffmpeg-nvenc.c
           obs-ffmpeg-output.c
+          obs-ffmpeg-output.h
           obs-ffmpeg-mux.c
           obs-ffmpeg-mux.h
           obs-ffmpeg-hls-mux.c
@@ -83,6 +84,7 @@ set_target_properties(obs-ffmpeg PROPERTIES FOLDER "plugins/obs-ffmpeg" PREFIX "
 
 if(OS_WINDOWS)
   find_package(AMF 1.4.29 REQUIRED)
+  find_package(FFnvcodec 12 REQUIRED)
 
   add_subdirectory(obs-amf-test)
   add_subdirectory(obs-nvenc-test)
@@ -90,7 +92,7 @@ if(OS_WINDOWS)
   if(MSVC)
     target_link_libraries(obs-ffmpeg PRIVATE OBS::w32-pthreads)
   endif()
-  target_link_libraries(obs-ffmpeg PRIVATE AMF::AMF)
+  target_link_libraries(obs-ffmpeg PRIVATE AMF::AMF FFnvcodec::FFnvcodec)
 
   set(MODULE_DESCRIPTION "OBS FFmpeg module")
   configure_file(${CMAKE_SOURCE_DIR}/cmake/bundle/windows/obs-module.rc.in obs-ffmpeg.rc)
@@ -99,10 +101,10 @@ if(OS_WINDOWS)
     obs-ffmpeg
     PRIVATE texture-amf.cpp
             texture-amf-opts.hpp
-            jim-nvenc.c
-            jim-nvenc.h
-            jim-nvenc-helpers.c
-            jim-nvenc-ver.h
+            obs-nvenc.c
+            obs-nvenc.h
+            obs-nvenc-helpers.c
+            obs-nvenc-ver.h
             obs-ffmpeg.rc)
 
 elseif(OS_POSIX AND NOT OS_MACOS)

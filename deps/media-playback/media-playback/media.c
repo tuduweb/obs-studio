@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017 Hugh Bailey <obs.jim@gmail.com>
+ * Copyright (c) 2023 Lain Bailey <lain@obsproject.com>
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -293,6 +293,14 @@ bool mp_media_prepare_frames(mp_media_t *m)
 			}
 		}
 
+		/* kind of a cheap fix, but because a stinger might be
+		 * interrupted and restart playback, the request_preload signal
+		 * might happen when the current frame is invalid, so clear out
+		 * these pointers to signify they're not valid. (the obsframe
+		 * structure is only used in the media thread, so this isn't a
+		 * threading issue) */
+		m->obsframe.data[0] = NULL;
+
 		if (m->has_video && !mp_decode_frame(&m->v))
 			return false;
 		if (m->has_audio && !mp_decode_frame(&m->a))
@@ -356,14 +364,15 @@ void mp_media_next_audio(mp_media_t *m)
 	struct obs_source_audio audio = {0};
 	AVFrame *f = d->frame;
 	int channels;
+
+	if (!mp_media_can_play_frame(m, d))
+		return;
+
 #if LIBAVFORMAT_VERSION_INT < AV_VERSION_INT(59, 19, 100)
 	channels = f->channels;
 #else
 	channels = f->ch_layout.nb_channels;
 #endif
-
-	if (!mp_media_can_play_frame(m, d))
-		return;
 
 	d->frame_ready = false;
 	if (!m->a_cb)
@@ -474,7 +483,7 @@ void mp_media_next_video(mp_media_t *m, bool preload)
 	frame->height = f->height;
 	frame->max_luminance = d->max_luminance;
 	frame->flip = flip;
-	frame->flags |= m->is_linear_alpha ? OBS_SOURCE_FRAME_LINEAR_ALPHA : 0;
+	frame->flags = m->is_linear_alpha ? OBS_SOURCE_FRAME_LINEAR_ALPHA : 0;
 	switch (f->color_trc) {
 	case AVCOL_TRC_BT709:
 	case AVCOL_TRC_GAMMA22:
@@ -495,7 +504,12 @@ void mp_media_next_video(mp_media_t *m, bool preload)
 	}
 
 	if (!m->is_local_file && !d->got_first_keyframe) {
+
+#if LIBAVUTIL_VERSION_INT < AV_VERSION_INT(58, 29, 100)
 		if (!f->key_frame)
+#else
+		if (!(f->flags & AV_FRAME_FLAG_KEY))
+#endif
 			return;
 
 		d->got_first_keyframe = true;
@@ -839,8 +853,11 @@ static inline bool mp_media_thread(mp_media_t *m)
 		if (pause)
 			continue;
 
-		if (preload_frame)
+		/* see note in mp_media_prepare_frames() for context on the
+		 * pointer check */
+		if (preload_frame && m->obsframe.data[0] && !is_active) {
 			m->v_preload_cb(m->opaque, &m->obsframe);
+		}
 
 		/* frames are ready */
 		if (is_active && !timeout) {
@@ -926,10 +943,6 @@ bool mp_media_init(mp_media_t *media, const struct mp_media_info *info)
 
 	static bool initialized = false;
 	if (!initialized) {
-#if LIBAVCODEC_VERSION_INT < AV_VERSION_INT(58, 9, 100)
-		av_register_all();
-		avcodec_register_all();
-#endif
 		avdevice_register_all();
 		avformat_network_init();
 		initialized = true;

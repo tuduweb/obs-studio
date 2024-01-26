@@ -1,5 +1,5 @@
 /******************************************************************************
-    Copyright (C) 2013-2014 by Hugh Bailey <obs.jim@gmail.com>
+    Copyright (C) 2023 by Lain Bailey <lain@obsproject.com>
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -274,6 +274,15 @@ void obs_add_module_path(const char *bin, const char *data)
 	da_push_back(obs->module_paths, &omp);
 }
 
+void obs_add_safe_module(const char *name)
+{
+	if (!obs || !name)
+		return;
+
+	char *item = bstrdup(name);
+	da_push_back(obs->safe_modules, &item);
+}
+
 extern void get_plugin_info(const char *path, bool *is_obs_plugin,
 			    bool *can_load);
 
@@ -281,6 +290,19 @@ struct fail_info {
 	struct dstr fail_modules;
 	size_t fail_count;
 };
+
+static bool is_safe_module(const char *name)
+{
+	if (!obs->safe_modules.num)
+		return true;
+
+	for (size_t i = 0; i < obs->safe_modules.num; i++) {
+		if (strcmp(name, obs->safe_modules.array[i]) == 0)
+			return true;
+	}
+
+	return false;
+}
 
 static void load_all_callback(void *param, const struct obs_module_info2 *info)
 {
@@ -295,6 +317,12 @@ static void load_all_callback(void *param, const struct obs_module_info2 *info)
 	if (!is_obs_plugin) {
 		blog(LOG_WARNING, "Skipping module '%s', not an OBS plugin",
 		     info->bin_path);
+		return;
+	}
+
+	if (!is_safe_module(info->name)) {
+		blog(LOG_WARNING, "Skipping module '%s', not on safe list",
+		     info->name);
 		return;
 	}
 
@@ -716,14 +744,14 @@ cleanup:
 void obs_register_source_s(const struct obs_source_info *info, size_t size)
 {
 	struct obs_source_info data = {0};
-	struct darray *array = NULL;
+	obs_source_info_array_t *array = NULL;
 
 	if (info->type == OBS_SOURCE_TYPE_INPUT) {
-		array = &obs->input_types.da;
+		array = &obs->input_types;
 	} else if (info->type == OBS_SOURCE_TYPE_FILTER) {
-		array = &obs->filter_types.da;
+		array = &obs->filter_types;
 	} else if (info->type == OBS_SOURCE_TYPE_TRANSITION) {
-		array = &obs->transition_types.da;
+		array = &obs->transition_types;
 	} else if (info->type != OBS_SOURCE_TYPE_SCENE) {
 		source_warn("Tried to register unknown source type: %u",
 			    info->type);
@@ -811,7 +839,7 @@ void obs_register_source_s(const struct obs_source_info *info, size_t size)
 	}
 
 	if (array)
-		darray_push_back(sizeof(struct obs_source_info), array, &data);
+		da_push_back(*array, &data);
 	da_push_back(obs->source_types, &data);
 	return;
 
@@ -936,37 +964,4 @@ void obs_register_service_s(const struct obs_service_info *info, size_t size)
 
 error:
 	HANDLE_ERROR(size, obs_service_info, info);
-}
-
-void obs_register_modal_ui_s(const struct obs_modal_ui *info, size_t size)
-{
-#define CHECK_REQUIRED_VAL_(info, val, func) \
-	CHECK_REQUIRED_VAL(struct obs_modal_ui, info, val, func)
-	CHECK_REQUIRED_VAL_(info, task, obs_register_modal_ui);
-	CHECK_REQUIRED_VAL_(info, target, obs_register_modal_ui);
-	CHECK_REQUIRED_VAL_(info, exec, obs_register_modal_ui);
-#undef CHECK_REQUIRED_VAL_
-
-	REGISTER_OBS_DEF(size, obs_modal_ui, obs->modal_ui_callbacks, info);
-	return;
-
-error:
-	HANDLE_ERROR(size, obs_modal_ui, info);
-}
-
-void obs_register_modeless_ui_s(const struct obs_modeless_ui *info, size_t size)
-{
-#define CHECK_REQUIRED_VAL_(info, val, func) \
-	CHECK_REQUIRED_VAL(struct obs_modeless_ui, info, val, func)
-	CHECK_REQUIRED_VAL_(info, task, obs_register_modeless_ui);
-	CHECK_REQUIRED_VAL_(info, target, obs_register_modeless_ui);
-	CHECK_REQUIRED_VAL_(info, create, obs_register_modeless_ui);
-#undef CHECK_REQUIRED_VAL_
-
-	REGISTER_OBS_DEF(size, obs_modeless_ui, obs->modeless_ui_callbacks,
-			 info);
-	return;
-
-error:
-	HANDLE_ERROR(size, obs_modeless_ui, info);
 }

@@ -1,5 +1,5 @@
 /******************************************************************************
-    Copyright (C) 2014 by Hugh Bailey <obs.jim@gmail.com>
+    Copyright (C) 2023 by Lain Bailey <lain@obsproject.com>
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -132,6 +132,8 @@ EXPORT void obs_data_set_autoselect_bool(obs_data_t *data, const char *name,
 					 bool val);
 EXPORT void obs_data_set_autoselect_obj(obs_data_t *data, const char *name,
 					obs_data_t *obj);
+EXPORT void obs_data_set_autoselect_array(obs_data_t *data, const char *name,
+					  obs_data_array_t *arr);
 
 /*
  * Get functions

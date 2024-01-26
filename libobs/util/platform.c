@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2014 Hugh Bailey <obs.jim@gmail.com>
+ * Copyright (c) 2023 Lain Bailey <lain@obsproject.com>
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -796,8 +796,11 @@ char *os_generate_formatted_filename(const char *extension, bool space,
 	if (!space)
 		dstr_replace(&sf, " ", "_");
 
-	dstr_cat_ch(&sf, '.');
-	dstr_cat(&sf, extension);
+	if (extension && *extension) {
+		dstr_cat_ch(&sf, '.');
+		dstr_cat(&sf, extension);
+	}
+
 	dstr_free(&c);
 
 	if (sf.len > 255)

@@ -1,5 +1,5 @@
 /******************************************************************************
-    Copyright (C) 2013 by Hugh Bailey <obs.jim@gmail.com>
+    Copyright (C) 2023 by Lain Bailey <lain@obsproject.com>
                           Philippe Groarke <philippe.groarke@gmail.com>
 
     This program is free software: you can redistribute it and/or modify
@@ -24,11 +24,10 @@
 #include <memory>
 #include <string>
 
-#include <libff/ff-util.h>
-
 #include <obs.hpp>
 
 #include "auth-base.hpp"
+#include "ffmpeg-utils.hpp"
 
 class OBSBasic;
 class QAbstractButton;
@@ -68,20 +67,6 @@ public slots:
 		blockSignals(blocked);
 	}
 };
-
-class OBSFFDeleter {
-public:
-	void operator()(const ff_format_desc *format)
-	{
-		ff_format_desc_free(format);
-	}
-	void operator()(const ff_codec_desc *codec)
-	{
-		ff_codec_desc_free(codec);
-	}
-};
-using OBSFFCodecDesc = std::unique_ptr<const ff_codec_desc, OBSFFDeleter>;
-using OBSFFFormatDesc = std::unique_ptr<const ff_format_desc, OBSFFDeleter>;
 
 class OBSBasicSettings : public QDialog {
 	Q_OBJECT
@@ -135,7 +120,7 @@ private:
 	static constexpr uint32_t ENCODER_HIDE_FLAGS =
 		(OBS_ENCODER_CAP_DEPRECATED | OBS_ENCODER_CAP_INTERNAL);
 
-	OBSFFFormatDesc formats;
+	std::vector<FFmpegFormat> formats;
 
 	OBSPropertiesView *streamProperties = nullptr;
 	OBSPropertiesView *streamEncoderProps = nullptr;
@@ -183,6 +168,8 @@ private:
 			   const char *value);
 	void SaveCheckBox(QAbstractButton *widget, const char *section,
 			  const char *value, bool invert = false);
+	void SaveGroupBox(QGroupBox *widget, const char *section,
+			  const char *value);
 	void SaveEdit(QLineEdit *widget, const char *section,
 		      const char *value);
 	void SaveSpinBox(QSpinBox *widget, const char *section,
@@ -221,7 +208,15 @@ private:
 		EnableApplyButton(false);
 	}
 
-	void HookWidget(QWidget *widget, const char *signal, const char *slot);
+	template<typename Widget, typename WidgetParent, typename... SignalArgs,
+		 typename... SlotArgs>
+	void HookWidget(Widget *widget,
+			void (WidgetParent::*signal)(SignalArgs...),
+			void (OBSBasicSettings::*slot)(SlotArgs...))
+	{
+		QObject::connect(widget, signal, this, slot);
+		widget->setProperty("changed", QVariant(false));
+	}
 
 	bool QueryChanges();
 	bool QueryAllowedToClose();
@@ -231,7 +226,7 @@ private:
 	void LoadColorSpaces();
 	void LoadColorFormats();
 	void LoadFormats();
-	void ReloadCodecs(const ff_format_desc *formatDesc);
+	void ReloadCodecs(const FFmpegFormat &format);
 
 	void UpdateColorFormatSpaceWarning();
 
@@ -258,6 +253,7 @@ private:
 	/* stream */
 	void InitStreamPage();
 	inline bool IsCustomService() const;
+	inline bool IsWHIP() const;
 	void LoadServices(bool showAll);
 	void OnOAuthStreamKeyConnected();
 	void OnAuthConnected();
@@ -267,7 +263,7 @@ private:
 	int prevLangIndex;
 	bool prevBrowserAccel;
 
-	void ServiceChanged();
+	void ServiceChanged(bool resetFields = false);
 	QString FindProtocol();
 	void UpdateServerList();
 	void UpdateKeyLink();
@@ -300,7 +296,7 @@ private:
 	void LoadAdvOutputRecordingEncoderProperties();
 	void LoadAdvOutputFFmpegSettings();
 	void LoadAdvOutputAudioSettings();
-	void SetAdvOutputFFmpegEnablement(ff_codec_type encoderType,
+	void SetAdvOutputFFmpegEnablement(FFmpegCodecType encoderType,
 					  bool enabled,
 					  bool enableEncode = false);
 
@@ -356,6 +352,8 @@ private:
 
 	bool AskIfCanCloseSettings();
 
+	void UpdateYouTubeAppDockSettings();
+
 	QIcon generalIcon;
 	QIcon streamIcon;
 	QIcon outputIcon;
@@ -375,6 +373,9 @@ private:
 	QIcon GetAdvancedIcon() const;
 
 	int CurrentFLVTrack();
+	int SimpleOutGetSelectedAudioTracks();
+	int AdvOutGetSelectedAudioTracks();
+	int AdvOutGetStreamingSelectedAudioTracks();
 
 	OBSService GetStream1Service();
 

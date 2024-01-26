@@ -1,3 +1,19 @@
+/*
+ * Copyright (c) 2023 Lain Bailey <lain@obsproject.com>
+ *
+ * Permission to use, copy, modify, and distribute this software for any
+ * purpose with or without fee is hereby granted, provided that the above
+ * copyright notice and this permission notice appear in all copies.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+ * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+ * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+ * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+ * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+ */
+
 #pragma once
 
 #include <obs.h>
@@ -40,6 +56,9 @@ extern void media_playback_play(media_playback_t *mp, bool looping,
 				bool reconnecting);
 extern void media_playback_play_pause(media_playback_t *mp, bool pause);
 extern void media_playback_stop(media_playback_t *mp);
+extern void media_playback_set_looping(media_playback_t *mp, bool looping);
+extern void media_playback_set_is_linear_alpha(media_playback_t *mp,
+					       bool is_linear_alpha);
 extern void media_playback_preload_frame(media_playback_t *mp);
 extern int64_t media_playback_get_current_time(media_playback_t *mp);
 extern void media_playback_seek(media_playback_t *mp, int64_t pos);

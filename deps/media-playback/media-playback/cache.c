@@ -1,3 +1,19 @@
+/*
+ * Copyright (c) 2023 Lain Bailey <lain@obsproject.com>
+ *
+ * Permission to use, copy, modify, and distribute this software for any
+ * purpose with or without fee is hereby granted, provided that the above
+ * copyright notice and this permission notice appear in all copies.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+ * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+ * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+ * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+ * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+ */
+
 #include <media-io/audio-io.h>
 #include <util/platform.h>
 
@@ -544,6 +560,9 @@ bool mp_cache_init(mp_cache_t *c, const struct mp_media_info *info)
 	info2.full_decode = true;
 
 	mp_media_t *m = &c->m;
+
+	pthread_mutex_init_value(&c->mutex);
+
 	if (!mp_media_init(m, &info2)) {
 		mp_cache_free(c);
 		return false;
@@ -553,7 +572,6 @@ bool mp_cache_init(mp_cache_t *c, const struct mp_media_info *info)
 		return false;
 	}
 
-	pthread_mutex_init_value(&c->mutex);
 	c->opaque = info->opaque;
 	c->v_cb = info->v_cb;
 	c->a_cb = info->a_cb;
