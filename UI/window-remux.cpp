@@ -641,6 +641,35 @@ void RemuxQueueModel::finishEntry(bool success)
 /**********************************************************
   The actual remux window implementation
 **********************************************************/
+QObject *CreateTabFilter()
+{
+	return new OBSEventFilter(
+		[](QObject *obj, QEvent *event) {
+
+		if (event->type() == QEvent::KeyPress) {
+
+			QKeyEvent *keyEvent = static_cast<QKeyEvent *>(event);
+			QTableView *table = static_cast<QTableView *>(obj);
+
+			if (keyEvent->key() == Qt::Key_Tab) {
+
+				if (table->currentIndex().row() !=
+				    table->model()->rowCount()) {
+					table->selectRow(
+						table->currentIndex().row() +
+						1);
+				}
+				return false;
+
+
+			}
+
+		}
+
+		return true;
+
+		});
+}
 
 OBSRemux::OBSRemux(const char *path, QWidget *parent, bool autoRemux_)
 	: QDialog(parent),
